@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import mimetypes
-import re
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from docling.backend.html_backend import HTMLDocumentBackend
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.document import InputDocument
+from docling.datamodel.settings import DocumentLimits
 from pypdf import PdfReader
 
 from .database import Database
@@ -34,35 +35,38 @@ SOURCE_TYPES = {
     ".json": "data",
 }
 MAX_EXTRACTED_CHARACTERS = 2_000_000
+MAX_DOWNLOAD_BYTES = 50_000_000
+HTML_EXTRACTOR_VERSION = "docling-html-2.118.0"
+PDF_EXTRACTOR_VERSION = "pypdf-6.15.0"
+PLAIN_EXTRACTOR_VERSION = "plain-v1"
 
 
-class _VisibleTextParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._hidden_depth = 0
+def extractor_version(path: Path) -> str:
+    suffix = path.suffix.casefold()
+    if suffix in {".html", ".htm"}:
+        return HTML_EXTRACTOR_VERSION
+    if suffix == ".pdf":
+        return PDF_EXTRACTOR_VERSION
+    return PLAIN_EXTRACTOR_VERSION
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.casefold() in {"script", "style", "noscript", "svg"}:
-            self._hidden_depth += 1
-        elif tag.casefold() in {"p", "br", "li", "h1", "h2", "h3", "article", "section"}:
-            self.parts.append("\n")
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() in {"script", "style", "noscript", "svg"} and self._hidden_depth:
-            self._hidden_depth -= 1
-        elif tag.casefold() in {"p", "li", "h1", "h2", "h3", "article", "section"}:
-            self.parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._hidden_depth:
-            self.parts.append(data)
-
-    def text(self) -> str:
-        value = html.unescape(" ".join(self.parts))
-        value = re.sub(r"[ \t]+", " ", value)
-        value = re.sub(r"\n\s*\n+", "\n\n", value)
-        return value.strip()
+def extract_html_markdown(path: Path) -> str:
+    source = InputDocument(
+        path_or_stream=path,
+        format=InputFormat.HTML,
+        backend=HTMLDocumentBackend,
+        limits=DocumentLimits(max_file_size=MAX_DOWNLOAD_BYTES),
+    )
+    if not source.valid:
+        raise ValueError("Docling could not read the HTML document")
+    backend = source._backend
+    try:
+        markdown = backend.convert().export_to_markdown().replace("\x00", "").strip()
+    finally:
+        backend.unload()
+    if not markdown:
+        raise ValueError("Docling produced empty Markdown")
+    return markdown
 
 
 def extract_ingest_text(path: Path) -> tuple[str, str | None]:
@@ -72,9 +76,7 @@ def extract_ingest_text(path: Path) -> tuple[str, str | None]:
             reader = PdfReader(path)
             content = "\n\n".join(page.extract_text() or "" for page in reader.pages)
         elif suffix in {".html", ".htm"}:
-            parser = _VisibleTextParser()
-            parser.feed(path.read_text(encoding="utf-8", errors="replace"))
-            content = parser.text()
+            content = extract_html_markdown(path)
         else:
             content = path.read_text(encoding="utf-8", errors="replace")
         if len(content) > MAX_EXTRACTED_CHARACTERS:
@@ -109,15 +111,18 @@ class IngestIndexer:
         files = self.discover()
         relative_paths = {path.relative_to(self.workspace).as_posix() for path in files}
         existing = {
-            row["path"]: (row["mtime_ns"], row["size"])
-            for row in self.database.fetch_all("SELECT path, mtime_ns, size FROM ingest_items")
+            row["path"]: (row["mtime_ns"], row["size"], row["extractor_version"])
+            for row in self.database.fetch_all(
+                "SELECT path, mtime_ns, size, extractor_version FROM ingest_items"
+            )
         }
         changed = 0
         with self.database.write() as connection:
             for path in files:
                 relative = path.relative_to(self.workspace).as_posix()
                 stat = path.stat()
-                if existing.get(relative) == (stat.st_mtime_ns, stat.st_size):
+                current_extractor = extractor_version(path)
+                if existing.get(relative) == (stat.st_mtime_ns, stat.st_size, current_extractor):
                     continue
                 content, extraction_error = extract_ingest_text(path)
                 title = path.stem.replace("_", " ").replace("-", " ").strip()
@@ -129,14 +134,16 @@ class IngestIndexer:
                     """
                     INSERT INTO ingest_items(
                         path, title, source_type, media_type, content, excerpt, word_count,
-                        source_url, extraction_error, mtime_ns, size, content_hash, indexed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                        source_url, extraction_error, extractor_version, mtime_ns, size,
+                        content_hash, indexed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(path) DO UPDATE SET title=excluded.title,
                         source_type=excluded.source_type, media_type=excluded.media_type,
                         content=excluded.content, excerpt=excluded.excerpt,
                         word_count=excluded.word_count,
                         extraction_error=excluded.extraction_error, mtime_ns=excluded.mtime_ns,
-                        size=excluded.size, content_hash=excluded.content_hash,
+                        extractor_version=excluded.extractor_version, size=excluded.size,
+                        content_hash=excluded.content_hash,
                         indexed_at=excluded.indexed_at
                     """,
                     (
@@ -148,6 +155,7 @@ class IngestIndexer:
                         extract_excerpt(content),
                         word_count,
                         extraction_error,
+                        current_extractor,
                         stat.st_mtime_ns,
                         stat.st_size,
                         content_hash,

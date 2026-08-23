@@ -21,6 +21,8 @@ MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)(?:\s+['\"][^'\"]*[
 WORD_RE = re.compile(r"[\wÀ-ž][\wÀ-ž'-]*", re.UNICODE)
 EMBEDDING_DIMENSIONS = 256
 EMBEDDING_MODEL = "local-hash-v1"
+KNOWLEDGE_SPACES = ("manual", "ingest", "wiki")
+SPREADSHEET_EXTENSIONS = {".ods", ".xlsx", ".csv"}
 EXCLUDED_PARTS = {
     ".git",
     ".idea",
@@ -30,17 +32,14 @@ EXCLUDED_PARTS = {
     "node_modules",
     "__pycache__",
     ".pytest_cache",
+    "locus",
 }
-EXCLUDED_FILES = {"README.md", "AGENTS.md"}
+EXCLUDED_FILES: set[str] = set()
 
 
 def space_for_path(path: str) -> str:
     first = PurePosixPath(path).parts[0].casefold() if PurePosixPath(path).parts else ""
-    if first == "ingest":
-        return "ingest"
-    if first == "wiki":
-        return "wiki"
-    return "manual"
+    return first if first in KNOWLEDGE_SPACES else "unknown"
 
 
 def utc_now() -> str:
@@ -57,6 +56,7 @@ def title_from_content(path: str, content: str) -> str:
 def extract_excerpt(content: str, limit: int = 220) -> str:
     cleaned = re.sub(r"```.*?```", " ", content, flags=re.DOTALL)
     cleaned = HEADING_RE.sub(" ", cleaned)
+    cleaned = WIKILINK_RE.sub(lambda match: match.group(2) or match.group(1), cleaned)
     cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
     cleaned = re.sub(r"[*_>`~-]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -167,13 +167,25 @@ class NoteIndexer:
 
     def discover(self) -> list[Path]:
         files: list[Path] = []
-        for path in self.workspace.rglob("*.md"):
-            relative = path.relative_to(self.workspace)
-            if path.is_symlink() or path.name in EXCLUDED_FILES:
+        for space in KNOWLEDGE_SPACES:
+            root = self.workspace / space
+            if not root.is_dir() or root.is_symlink():
                 continue
-            if any(part.startswith(".") or part in EXCLUDED_PARTS for part in relative.parts[:-1]):
-                continue
-            files.append(path)
+            allowed_extensions = {".md"}
+            if space == "manual":
+                allowed_extensions.update(SPREADSHEET_EXTENSIONS)
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.casefold() not in allowed_extensions:
+                    continue
+                relative = path.relative_to(self.workspace)
+                if path.is_symlink() or path.name in EXCLUDED_FILES:
+                    continue
+                if any(
+                    part.startswith(".") or part in EXCLUDED_PARTS
+                    for part in relative.parts[1:-1]
+                ):
+                    continue
+                files.append(path)
         return sorted(files, key=lambda item: item.as_posix().casefold())
 
     def scan(self) -> dict[str, int]:
@@ -190,7 +202,15 @@ class NoteIndexer:
                 stat = path.stat()
                 if existing.get(relative) == (stat.st_mtime_ns, stat.st_size):
                     continue
-                content = path.read_text(encoding="utf-8", errors="replace")
+                if path.suffix.casefold() in SPREADSHEET_EXTENSIONS:
+                    from .spreadsheets import SpreadsheetError, spreadsheet_to_markdown
+
+                    try:
+                        content = spreadsheet_to_markdown(path)
+                    except SpreadsheetError as error:
+                        content = f"# {path.stem}\n\n> Spreadsheet preview unavailable: {error}\n"
+                else:
+                    content = path.read_text(encoding="utf-8", errors="replace")
                 content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 title = title_from_content(relative, content)
                 headings = extract_headings(content)
@@ -246,7 +266,10 @@ class NoteIndexer:
                 connection.execute("DELETE FROM notes WHERE path = ?", (relative,))
 
             all_notes = connection.execute("SELECT path, content FROM notes").fetchall()
-            all_paths = {row["path"] for row in all_notes}
+            all_paths = {row["path"] for row in all_notes} | {
+                row["path"]
+                for row in connection.execute("SELECT path FROM ingest_items").fetchall()
+            }
             connection.execute("DELETE FROM links")
             for row in all_notes:
                 for link in extract_links(row["path"], row["content"], all_paths):

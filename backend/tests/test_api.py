@@ -1,13 +1,17 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.web_ingest import DownloadedWebSource
 
 
 def app_for(tmp_path: Path):
-    (tmp_path / "First.md").write_text("# First note\n\nA useful starting point.", encoding="utf-8")
+    manual = tmp_path / "manual"
+    manual.mkdir()
+    (manual / "First.md").write_text("# First note\n\nA useful starting point.", encoding="utf-8")
     frontend = tmp_path / ".frontend"
     frontend.mkdir()
     return create_app(
@@ -26,7 +30,7 @@ def test_health_notes_search_and_graph(tmp_path: Path) -> None:
         assert client.get("/api/health").json()["notes"] == 3
         notes = client.get("/api/notes").json()
         assert any(note["title"] == "First note" for note in notes["notes"])
-        assert client.get("/api/search", params={"q": "starting"}).json()["results"][0]["path"] == "First.md"
+        assert client.get("/api/search", params={"q": "starting"}).json()["results"][0]["path"] == "manual/First.md"
         assert len(client.get("/api/graph").json()["nodes"]) == 3
         assert client.get("/api/wiki/schema").json()["path"] == "AGENTS.md"
         assert client.get("/api/wiki/lint").json()["pages"] == 0
@@ -35,13 +39,13 @@ def test_health_notes_search_and_graph(tmp_path: Path) -> None:
 def test_create_and_edit_note(tmp_path: Path) -> None:
     with TestClient(app_for(tmp_path)) as client:
         created = client.post(
-            "/api/notes", json={"path": "Ideas/New idea.md", "content": "# New idea\n\nDraft"}
+            "/api/notes", json={"path": "manual/Ideas/New idea.md", "content": "# New idea\n\nDraft"}
         )
         assert created.status_code == 201
-        assert (tmp_path / "Ideas" / "New idea.md").exists()
+        assert (tmp_path / "manual" / "Ideas" / "New idea.md").exists()
 
         updated = client.put(
-            "/api/notes/Ideas%2FNew%20idea.md", json={"content": "# Better idea\n\nRevised"}
+            "/api/notes/manual%2FIdeas%2FNew%20idea.md", json={"content": "# Better idea\n\nRevised"}
         )
         assert updated.status_code == 200
         assert updated.json()["title"] == "Better idea"
@@ -53,9 +57,53 @@ def test_rejects_workspace_traversal(tmp_path: Path) -> None:
             "/api/notes", json={"path": "../outside.md", "content": "no"}
         )
         assert response.status_code == 400
+        assert client.post(
+            "/api/notes", json={"path": "loose.md", "content": "no"}
+        ).status_code == 400
 
 
-def test_ingest_upload_url_and_space_file_view(tmp_path: Path) -> None:
+def test_manual_spreadsheet_upload_is_indexed_searchable_and_viewable(
+    tmp_path: Path,
+) -> None:
+    with TestClient(app_for(tmp_path)) as client:
+        uploaded = client.post(
+            "/api/manual/spreadsheet",
+            data={"folder": "manual/research"},
+            files={
+                "file": (
+                    "experiments.csv",
+                    b"Experiment,Result\nAgent trust,Promising\n",
+                    "text/csv",
+                )
+            },
+        )
+
+        assert uploaded.status_code == 201
+        assert uploaded.json()["path"] == "manual/research/experiments.csv"
+        assert uploaded.json()["kind"] == "spreadsheet"
+        viewed = client.get(
+            "/api/spreadsheets/manual%2Fresearch%2Fexperiments.csv"
+        )
+        assert viewed.status_code == 200
+        assert viewed.json()["sheets"][0]["rows"][1] == ["Agent trust", "Promising"]
+        results = client.get("/api/search", params={"q": "promising"}).json()[
+            "results"
+        ]
+        assert results[0]["path"] == "manual/research/experiments.csv"
+
+
+def test_ingest_upload_url_and_space_file_view(tmp_path: Path, monkeypatch) -> None:
+    async def fake_download(url: str) -> DownloadedWebSource:
+        return DownloadedWebSource(
+            original_url=url,
+            final_url=url,
+            content=b"<html><head><title>Example report</title></head><body>Archived web knowledge about agent trust.</body></html>",
+            media_type="text/html",
+            extension=".html",
+            title="Example report",
+        )
+
+    monkeypatch.setattr("app.main.download_web_source", fake_download)
     with TestClient(app_for(tmp_path)) as client:
         uploaded = client.post(
             "/api/ingest/upload",
@@ -65,12 +113,20 @@ def test_ingest_upload_url_and_space_file_view(tmp_path: Path) -> None:
         assert uploaded.json()["space"] == "ingest"
         assert uploaded.json()["kind"] == "asset"
 
-        bookmarked = client.post(
+        downloaded = client.post(
             "/api/ingest/url",
             json={"url": "https://example.com/report", "title": "Example report"},
         )
-        assert bookmarked.status_code == 201
-        assert bookmarked.json()["path"].startswith("ingest/web/example-report")
+        assert downloaded.status_code == 201
+        assert downloaded.json()["path"] == "ingest/web/example-report.html"
+        assert (tmp_path / "ingest" / "web" / "example-report.html").read_bytes().startswith(
+            b"<html>"
+        )
+        item = client.get(
+            "/api/ingest/items/ingest%2Fweb%2Fexample-report.html"
+        ).json()
+        assert item["source_url"] == "https://example.com/report"
+        assert "Archived web knowledge" in item["content"]
 
         files = client.get("/api/files").json()["files"]
         assert {item["space"] for item in files} == {"manual", "ingest", "wiki"}
@@ -78,6 +134,41 @@ def test_ingest_upload_url_and_space_file_view(tmp_path: Path) -> None:
             "integration_status"
         ] == "unprocessed"
         assert client.get("/api/search", params={"q": "external research"}).json()["results"][0]["space"] == "ingest"
+        assert client.get("/api/search", params={"q": "archived web knowledge"}).json()["results"][0]["path"] == "ingest/web/example-report.html"
+
+        chat = client.post(
+            "/api/chat",
+            json={"question": "Review https://example.com/automatic-source"},
+        )
+        assert chat.status_code == 200
+        activity_events = [
+            json.loads(line)
+            for line in chat.text.splitlines()
+            if line and json.loads(line).get("type") == "activity"
+        ]
+        assert activity_events[:2] == [
+            {
+                "type": "activity",
+                "activity": {
+                    "id": "download:1",
+                    "label": "Downloading website into Ingest",
+                    "detail": "https://example.com/automatic-source",
+                    "kind": "download_url",
+                    "status": "running",
+                },
+            },
+            {
+                "type": "activity",
+                "activity": {
+                    "id": "download:1",
+                    "label": "Downloaded ingest/web/example-report-2.html",
+                    "detail": "https://example.com/automatic-source",
+                    "kind": "download_url",
+                    "status": "completed",
+                },
+            },
+        ]
+        assert (tmp_path / "ingest" / "web" / "example-report-2.html").is_file()
 
 
 def test_ingest_markdown_is_immutable_through_notes_api(tmp_path: Path) -> None:
@@ -96,44 +187,44 @@ def test_ingest_markdown_is_immutable_through_notes_api(tmp_path: Path) -> None:
 
 def test_file_tree_directory_rename_and_delete_actions(tmp_path: Path) -> None:
     with TestClient(app_for(tmp_path)) as client:
-        folder = client.post("/api/files/directories", json={"path": "Projects"})
+        folder = client.post("/api/files/directories", json={"path": "manual/Projects"})
         assert folder.status_code == 201
         assert {item["path"] for item in client.get("/api/files").json()["directories"]} >= {
-            "Projects"
+            "manual/Projects"
         }
 
         moved_folder = client.post(
             "/api/files/move",
             json={
-                "source_path": "Projects",
-                "target_path": "Work",
+                "source_path": "manual/Projects",
+                "target_path": "manual/Work",
                 "is_directory": True,
             },
         )
         assert moved_folder.status_code == 200
-        assert moved_folder.json()["path"] == "Work"
+        assert moved_folder.json()["path"] == "manual/Work"
 
         note = client.post(
-            "/api/notes", json={"path": "Work/Draft.md", "content": "# Draft\n"}
+            "/api/notes", json={"path": "manual/Work/Draft.md", "content": "# Draft\n"}
         )
         assert note.status_code == 201
-        assert client.delete("/api/directories/Work").status_code == 409
+        assert client.delete("/api/directories/manual%2FWork").status_code == 409
 
         renamed = client.post(
             "/api/files/move",
             json={
-                "source_path": "Work/Draft.md",
-                "target_path": "Work/Final.md",
+                "source_path": "manual/Work/Draft.md",
+                "target_path": "manual/Work/Final.md",
                 "is_directory": False,
             },
         )
         assert renamed.status_code == 200
-        assert renamed.json()["path"] == "Work/Final.md"
-        assert not (tmp_path / "Work" / "Draft.md").exists()
+        assert renamed.json()["path"] == "manual/Work/Final.md"
+        assert not (tmp_path / "manual" / "Work" / "Draft.md").exists()
 
-        assert client.delete("/api/files/Work%2FFinal.md").status_code == 200
-        assert client.delete("/api/directories/Work").status_code == 200
-        assert not (tmp_path / "Work").exists()
+        assert client.delete("/api/files/manual%2FWork%2FFinal.md").status_code == 200
+        assert client.delete("/api/directories/manual%2FWork").status_code == 200
+        assert not (tmp_path / "manual" / "Work").exists()
 
 
 def test_file_actions_protect_spaces_and_special_wiki_files(tmp_path: Path) -> None:
@@ -141,7 +232,7 @@ def test_file_actions_protect_spaces_and_special_wiki_files(tmp_path: Path) -> N
         crossing = client.post(
             "/api/files/move",
             json={
-                "source_path": "First.md",
+                "source_path": "manual/First.md",
                 "target_path": "wiki/First.md",
                 "is_directory": False,
             },
@@ -157,6 +248,13 @@ def test_agent_model_and_reasoning_settings(tmp_path: Path) -> None:
         assert initial["model"] == "gpt-test"
         assert initial["reasoning_effort"] == "medium"
         assert initial["fast_mode"] is False
+        assert initial["manual_integration"] == {
+            "enabled": True,
+            "interval_seconds": 60.0,
+            "pending": 1,
+            "tracked": 0,
+            "last_integrated_at": None,
+        }
 
         updated = client.put(
             "/api/settings",

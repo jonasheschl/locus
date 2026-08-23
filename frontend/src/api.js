@@ -25,6 +25,7 @@ export const getFiles = () => api('/api/files');
 export const getStats = () => api('/api/stats');
 export const getAuthStatus = () => api('/api/auth/codex/status');
 export const getNote = (path) => api(`/api/notes/${encodeURIComponent(path)}`);
+export const getSpreadsheet = (path) => api(`/api/spreadsheets/${encodeURIComponent(path)}`);
 export const getIngestItem = (path) => api(`/api/ingest/items/${encodeURIComponent(path)}`);
 export const getThreads = () => api('/api/chat/threads');
 export const getThread = (id) => api(`/api/chat/threads/${encodeURIComponent(id)}`);

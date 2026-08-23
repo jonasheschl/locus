@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS ingest_items (
     word_count INTEGER NOT NULL,
     source_url TEXT,
     extraction_error TEXT,
+    extractor_version TEXT NOT NULL DEFAULT '',
     mtime_ns INTEGER NOT NULL,
     size INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
@@ -152,6 +153,14 @@ CREATE TABLE IF NOT EXISTS source_integrations (
     FOREIGN KEY (operation_id) REFERENCES wiki_operations(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS manual_integrations (
+    path TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    integrated_at TEXT NOT NULL,
+    operation_id TEXT,
+    FOREIGN KEY (operation_id) REFERENCES wiki_operations(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS runtime_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -180,6 +189,14 @@ class Database:
             if "space" not in note_columns:
                 connection.execute(
                     "ALTER TABLE notes ADD COLUMN space TEXT NOT NULL DEFAULT 'manual'"
+                )
+            ingest_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(ingest_items)").fetchall()
+            }
+            if "extractor_version" not in ingest_columns:
+                connection.execute(
+                    "ALTER TABLE ingest_items ADD COLUMN extractor_version TEXT NOT NULL DEFAULT ''"
                 )
             connection.execute(
                 """

@@ -11,7 +11,7 @@
   let usage = null;
   let usageLoading = true;
   let usageError = '';
-  let data = { model: '', reasoning_effort: 'medium', fast_mode: false, models: [], reasoning_efforts: [] };
+  let data = { model: '', reasoning_effort: 'medium', fast_mode: false, models: [], reasoning_efforts: [], manual_integration: null };
 
   const effortMeta = {
     none: ['None', 'Fastest'],
@@ -60,6 +60,11 @@
   function displayName(value) {
     if (!value) return '';
     return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  function integrationTime(timestamp) {
+    if (!timestamp) return 'No completed snapshot yet';
+    return `Last completed ${new Date(timestamp).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`;
   }
 
   function chooseModel(model) {
@@ -113,6 +118,13 @@
         <div><span><strong>Fast mode</strong><small>Request priority processing for lower latency</small></span><button class:active={data.fast_mode} aria-label="Toggle Fast mode" aria-pressed={data.fast_mode} onclick={() => data = { ...data, fast_mode: !data.fast_mode }}><i></i></button></div>
         <p>Fast mode changes request processing speed, not the selected reasoning effort. It may use a different allowance or rate when available to your account.</p>
       </section>
+      {#if data.manual_integration}
+        <section class="settings-section automation-setting">
+          <div><span><RefreshCw size={15} /><strong>Automatic Manual integration</strong></span><i>Every {data.manual_integration.interval_seconds}s</i></div>
+          <div class="automation-summary"><span>{data.manual_integration.pending} pending</span><span>{data.manual_integration.tracked} tracked</span></div>
+          <p>{integrationTime(data.manual_integration.last_integrated_at)}. Changed Manual notes are compiled into Wiki automatically; unchanged snapshots are skipped.</p>
+        </section>
+      {/if}
       <section class="settings-section usage-setting">
         <div class="usage-heading">
           <span><Gauge size={15} /><strong>Codex account usage</strong></span>

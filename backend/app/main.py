@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
@@ -9,7 +10,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -22,8 +23,22 @@ from .auth import AuthError, CodexAuth
 from .config import Settings, settings as default_settings
 from .database import Database
 from .ingest import IngestIndexer, SUPPORTED_INGEST_EXTENSIONS
-from .indexer import EXCLUDED_FILES, EXCLUDED_PARTS, NoteIndexer, space_for_path
+from .indexer import (
+    EXCLUDED_FILES,
+    EXCLUDED_PARTS,
+    KNOWLEDGE_SPACES,
+    SPREADSHEET_EXTENSIONS,
+    NoteIndexer,
+    space_for_path,
+)
+from .manual_integration import ManualIntegrationTracker
 from .operations import OperationConflict, OperationManager, ensure_wiki_contract
+from .spreadsheets import SpreadsheetError, read_spreadsheet
+from .web_ingest import WebIngestError, download_web_source, extract_http_urls
+from .workspace_shell import WorkspaceShell
+
+
+logger = logging.getLogger(__name__)
 
 
 class NoteCreate(BaseModel):
@@ -81,15 +96,106 @@ async def periodic_scan(
             continue
 
 
+async def integrate_pending_manual_changes(
+    indexer: NoteIndexer,
+    tracker: ManualIntegrationTracker,
+    agent: WikiAgent,
+) -> dict[str, Any]:
+    indexer.scan()
+    changes = tracker.pending()
+    if not changes:
+        return {"status": "idle", "changes": 0, "operation_id": None}
+    result = await agent.integrate_manual_changes(changes)
+    tracker.mark_completed(changes, result["operation_id"])
+    return {
+        "status": "completed",
+        "changes": len(changes),
+        "operation_id": result["operation_id"],
+    }
+
+
+async def periodic_manual_integration(
+    indexer: NoteIndexer,
+    tracker: ManualIntegrationTracker,
+    agent: WikiAgent,
+    interval: float,
+) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            result = await integrate_pending_manual_changes(indexer, tracker, agent)
+            if result["changes"]:
+                logger.info(
+                    "Automatically integrated %s Manual change(s)", result["changes"]
+                )
+        except AuthError:
+            logger.info("Automatic Manual integration is waiting for Codex login")
+        except Exception:
+            logger.exception("Automatic Manual integration failed; it will retry")
+
+
 def create_app(app_settings: Settings = default_settings) -> FastAPI:
     database = Database(app_settings.database)
     indexer = NoteIndexer(app_settings.workspace, database)
     ingest_indexer = IngestIndexer(app_settings.workspace, database)
+    manual_integrations = ManualIntegrationTracker(database)
     operations = OperationManager(app_settings.workspace, database, indexer)
     auth = CodexAuth(database)
+    contract_path = app_settings.contract or Path(__file__).resolve().parents[2] / "AGENTS.md"
+    workspace_shell = None
+    if app_settings.agent_workspace and app_settings.workspace_runtime_socket:
+        app_settings.agent_workspace.mkdir(parents=True, exist_ok=True)
+        workspace_shell = WorkspaceShell(
+            app_settings.workspace_runtime_socket,
+            app_settings.agent_workspace,
+            app_settings.workspace,
+            ingest_indexer,
+        )
     agent = WikiAgent(
-        database, indexer, ingest_indexer, operations, auth, app_settings.model
+        database,
+        indexer,
+        ingest_indexer,
+        operations,
+        auth,
+        app_settings.model,
+        contract_path,
+        workspace_shell,
     )
+
+    async def store_web_source(url: str, requested_title: str | None = None) -> dict[str, Any]:
+        normalized_url = url.strip()
+        existing = database.fetch_one(
+            "SELECT path FROM ingest_items WHERE source_url = ? ORDER BY indexed_at DESC LIMIT 1",
+            (normalized_url,),
+        )
+        if existing and (app_settings.workspace / existing["path"]).is_file():
+            return file_payload(database, existing["path"])
+
+        downloaded = await download_web_source(normalized_url)
+        title = (requested_title or downloaded.title).strip()[:300] or "Web source"
+        slug = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")[:80] or "web-source"
+        target_dir = app_settings.workspace / "ingest" / "web"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = available_path(target_dir / f"{slug}{downloaded.extension}")
+        atomic_write_bytes(target, downloaded.content)
+        ingest_indexer.scan()
+        relative = target.relative_to(app_settings.workspace).as_posix()
+        item = database.fetch_one(
+            "SELECT content FROM ingest_items WHERE path = ?", (relative,)
+        )
+        if not item:
+            raise WebIngestError("The downloaded website could not be indexed", 500)
+        with database.write() as connection:
+            connection.execute(
+                "UPDATE ingest_items SET title = ?, source_url = ? WHERE path = ?",
+                (title, normalized_url, relative),
+            )
+            connection.execute("DELETE FROM ingest_fts WHERE path = ?", (relative,))
+            connection.execute(
+                "INSERT INTO ingest_fts(path, title, content) VALUES (?, ?, ?)",
+                (relative, title, item["content"]),
+            )
+        return file_payload(database, relative)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -100,12 +206,25 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         scan_task = asyncio.create_task(
             periodic_scan(indexer, ingest_indexer, app_settings.scan_interval_seconds)
         )
+        manual_integration_task = asyncio.create_task(
+            periodic_manual_integration(
+                indexer,
+                manual_integrations,
+                agent,
+                app_settings.manual_integration_interval_seconds,
+            )
+        )
         try:
             yield
         finally:
             scan_task.cancel()
+            manual_integration_task.cancel()
             with suppress(asyncio.CancelledError):
                 await scan_task
+            with suppress(asyncio.CancelledError):
+                await manual_integration_task
+            if workspace_shell:
+                await workspace_shell.close()
             await auth.close()
 
     app = FastAPI(
@@ -246,9 +365,12 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         files = [
             {
                 **row,
-                "kind": "markdown",
-                "editable": True,
-                "extension": ".md",
+                "kind": "spreadsheet"
+                if Path(row["path"]).suffix.casefold() in SPREADSHEET_EXTENSIONS
+                else "markdown",
+                "editable": row["space"] != "ingest"
+                and Path(row["path"]).suffix.casefold() == ".md",
+                "extension": Path(row["path"]).suffix.casefold(),
             }
             for row in markdown
         ]
@@ -286,7 +408,13 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         target, target_relative = resolve_knowledge_entry(
             app_settings.workspace, body.target_path
         )
-        if source_relative in {"ingest", "wiki", "wiki/index.md", "wiki/log.md"}:
+        if source_relative in {
+            "manual",
+            "ingest",
+            "wiki",
+            "wiki/index.md",
+            "wiki/log.md",
+        }:
             raise HTTPException(status_code=403, detail="That path is maintained by Locus")
         if not source.exists() or source.is_dir() != body.is_directory:
             raise HTTPException(status_code=404, detail="File or directory not found")
@@ -337,7 +465,7 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         target, relative = resolve_knowledge_entry(
             app_settings.workspace, directory_path
         )
-        if relative in {"ingest", "wiki"}:
+        if relative in set(KNOWLEDGE_SPACES):
             raise HTTPException(status_code=403, detail="Knowledge-space roots cannot be deleted")
         if not target.is_dir():
             raise HTTPException(status_code=404, detail="Directory not found")
@@ -374,31 +502,40 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         relative = target.relative_to(app_settings.workspace).as_posix()
         return file_payload(database, relative)
 
-    @app.post("/api/ingest/url", status_code=201)
-    async def ingest_url(body: URLIngest) -> dict[str, Any]:
-        parsed = urlparse(body.url.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise HTTPException(status_code=400, detail="Enter a valid HTTP or HTTPS URL")
-        title = (body.title or parsed.netloc).strip()
-        slug = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")[:80] or "web-source"
-        target_dir = app_settings.workspace / "ingest" / "web"
+    @app.post("/api/manual/spreadsheet", status_code=201)
+    async def upload_manual_spreadsheet(
+        file: UploadFile = File(...), folder: str = Form(default="manual")
+    ) -> dict[str, Any]:
+        filename = Path(file.filename or "").name
+        suffix = Path(filename).suffix.casefold()
+        if not filename or suffix not in SPREADSHEET_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail="Supported spreadsheet notes are ODS, XLSX, and CSV",
+            )
+        target_dir = resolve_manual_directory(app_settings.workspace, folder)
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = available_path(target_dir / f"{slug}.md")
-        timestamp = datetime.now(UTC).isoformat()
-        content = (
-            "---\n"
-            f"source_url: {json.dumps(body.url.strip(), ensure_ascii=False)}\n"
-            f"ingested_at: {json.dumps(timestamp)}\n"
-            "ingest_status: pending\n"
-            "---\n\n"
-            f"# {title}\n\n"
-            f"[Open original source]({body.url.strip()})\n\n"
-            f"{body.notes.strip()}\n"
-        )
-        atomic_write(target, content)
+        target = available_path(target_dir / filename)
+        content = await file.read(50_000_001)
+        await file.close()
+        if len(content) > 50_000_000:
+            raise HTTPException(status_code=413, detail="Spreadsheet files are limited to 50 MB")
+        atomic_write_bytes(target, content)
+        try:
+            read_spreadsheet(target)
+        except SpreadsheetError as error:
+            target.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=str(error)) from error
         indexer.scan()
         relative = target.relative_to(app_settings.workspace).as_posix()
         return file_payload(database, relative)
+
+    @app.post("/api/ingest/url", status_code=201)
+    async def ingest_url(body: URLIngest) -> dict[str, Any]:
+        try:
+            return await store_web_source(body.url, body.title)
+        except WebIngestError as error:
+            raise HTTPException(status_code=error.status_code, detail=str(error)) from error
 
     @app.get("/api/ingest/items/{item_path:path}")
     async def get_ingest_item(item_path: str) -> dict[str, Any]:
@@ -438,6 +575,29 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
     async def get_note(note_path: str) -> dict[str, Any]:
         normalized = normalize_note_path(app_settings.workspace, note_path)
         return note_payload(database, normalized)
+
+    @app.get("/api/spreadsheets/{item_path:path}")
+    async def get_spreadsheet(item_path: str) -> dict[str, Any]:
+        target, relative = resolve_knowledge_entry(app_settings.workspace, item_path)
+        if (
+            space_for_path(relative) != "manual"
+            or target.suffix.casefold() not in SPREADSHEET_EXTENSIONS
+            or not target.is_file()
+        ):
+            raise HTTPException(status_code=404, detail="Spreadsheet note not found")
+        note = database.fetch_one("SELECT * FROM notes WHERE path = ?", (relative,))
+        if not note:
+            raise HTTPException(status_code=404, detail="Spreadsheet note is not indexed")
+        try:
+            sheets = read_spreadsheet(target)
+        except SpreadsheetError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            **database.decode_note(note),
+            "kind": "spreadsheet",
+            "media_type": target.suffix.casefold().lstrip(".").upper(),
+            "sheets": sheets,
+        }
 
     @app.put("/api/notes/{note_path:path}")
     async def update_note(note_path: str, body: NoteUpdate) -> dict[str, Any]:
@@ -511,6 +671,11 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
             "fast_mode": fast_mode,
             "models": models,
             "reasoning_efforts": REASONING_EFFORTS,
+            "manual_integration": {
+                "enabled": True,
+                "interval_seconds": app_settings.manual_integration_interval_seconds,
+                **manual_integrations.status(),
+            },
         }
 
     @app.put("/api/settings")
@@ -541,7 +706,7 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
 
     @app.get("/api/wiki/schema")
     async def wiki_schema() -> dict[str, str]:
-        path = app_settings.workspace / "AGENTS.md"
+        path = contract_path
         return {"path": "AGENTS.md", "content": path.read_text(encoding="utf-8")}
 
     @app.get("/api/operations/{operation_id}")
@@ -582,20 +747,53 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
     async def chat(body: ChatRequest):
         async def events():
             try:
+                context_paths = list(body.context_paths)
+                for position, url in enumerate(extract_http_urls(body.question), start=1):
+                    activity_id = f"download:{position}"
+                    yield json.dumps(
+                        {
+                            "type": "activity",
+                            "activity": {
+                                "id": activity_id,
+                                "label": "Downloading website into Ingest",
+                                "detail": url,
+                                "kind": "download_url",
+                                "status": "running",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ) + "\n"
+                    source = await store_web_source(url)
+                    yield json.dumps(
+                        {
+                            "type": "activity",
+                            "activity": {
+                                "id": activity_id,
+                                "label": f"Downloaded {source['path']}",
+                                "detail": url,
+                                "kind": "download_url",
+                                "status": "completed",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ) + "\n"
+                    if source["path"] not in context_paths:
+                        context_paths.append(source["path"])
                 async for event in agent.stream_answer(
                     body.question,
                     body.thread_id,
                     body.current_note,
-                    body.context_paths,
+                    context_paths,
                 ):
                     yield json.dumps(event, ensure_ascii=False) + "\n"
-            except (AuthError, KeyError, ValueError) as error:
+            except (AuthError, KeyError, ValueError, WebIngestError) as error:
                 yield json.dumps({"type": "error", "message": str(error)}) + "\n"
             except Exception:
+                logger.exception("Codex chat request failed")
                 yield json.dumps(
                     {
                         "type": "error",
-                        "message": "The Codex request failed. Check your login and try again.",
+                        "message": "The model request failed. Check the Locus server logs and try again.",
                     }
                 ) + "\n"
 
@@ -638,6 +836,11 @@ def resolve_note_path(workspace: Path, note_path: str) -> Path:
         relative = candidate.relative_to(workspace)
     except ValueError as error:
         raise HTTPException(status_code=400, detail="Note path must stay inside the workspace") from error
+    if space_for_path(relative.as_posix()) not in KNOWLEDGE_SPACES:
+        raise HTTPException(
+            status_code=400,
+            detail="Notes must live below manual/, ingest/, or wiki/",
+        )
     if candidate.name in EXCLUDED_FILES or any(
         part.startswith(".") or part in EXCLUDED_PARTS for part in relative.parts[:-1]
     ):
@@ -682,6 +885,23 @@ def resolve_ingest_directory(workspace: Path, folder: str) -> Path:
     return candidate
 
 
+def resolve_manual_directory(workspace: Path, folder: str) -> Path:
+    root = (workspace / "manual").resolve()
+    raw = unquote(folder).replace("\\", "/").strip("/")
+    if raw.casefold() == "manual":
+        raw = ""
+    elif raw.casefold().startswith("manual/"):
+        raw = raw[len("manual/") :]
+    candidate = (root / raw).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Manual folder must stay inside manual/") from error
+    if any(part.startswith(".") for part in candidate.relative_to(root).parts):
+        raise HTTPException(status_code=400, detail="Hidden Manual folders are not supported")
+    return candidate
+
+
 def normalize_ingest_path(workspace: Path, item_path: str) -> str:
     raw = unquote(item_path).replace("\\", "/").strip("/")
     if not raw.casefold().startswith("ingest/"):
@@ -711,14 +931,22 @@ def file_payload(database: Database, path: str) -> dict[str, Any]:
         (path,),
     )
     if note:
-        payload = {**note, "kind": "markdown", "editable": True, "extension": ".md"}
+        extension = Path(path).suffix.casefold()
+        payload = {
+            **note,
+            "kind": "spreadsheet"
+            if extension in SPREADSHEET_EXTENSIONS
+            else "markdown",
+            "editable": extension == ".md" and note["space"] != "ingest",
+            "extension": extension,
+        }
         if note["space"] == "ingest":
             payload.update(source_integration_payload(database, path))
         return payload
     item = database.fetch_one(
         """
         SELECT path, title, source_type, media_type, size, word_count, indexed_at,
-               extraction_error FROM ingest_items WHERE path = ?
+               source_url, extraction_error FROM ingest_items WHERE path = ?
         """,
         (path,),
     )
@@ -806,6 +1034,11 @@ def resolve_knowledge_entry(workspace: Path, raw_path: str) -> tuple[Path, str]:
     raw = unquote(raw_path).replace("\\", "/").strip("/")
     if not raw:
         raise HTTPException(status_code=400, detail="A relative path is required")
+    if space_for_path(raw) not in KNOWLEDGE_SPACES:
+        raise HTTPException(
+            status_code=400,
+            detail="Paths must stay below manual/, ingest/, or wiki/",
+        )
     candidate = (workspace / raw).resolve()
     try:
         relative_path = candidate.relative_to(workspace.resolve())
@@ -821,21 +1054,23 @@ def resolve_knowledge_entry(workspace: Path, raw_path: str) -> tuple[Path, str]:
 
 def knowledge_directories(workspace: Path) -> list[dict[str, str]]:
     directories: list[dict[str, str]] = []
-    for current, names, _ in os.walk(workspace, followlinks=False):
-        current_path = Path(current)
-        names[:] = [
-            name
-            for name in names
-            if not name.startswith(".")
-            and name not in EXCLUDED_PARTS
-            and not (current_path / name).is_symlink()
-        ]
-        for name in names:
-            path = current_path / name
-            relative = path.relative_to(workspace).as_posix()
-            if relative in {"ingest", "wiki"}:
-                continue
-            directories.append({"path": relative, "space": space_for_path(relative)})
+    for space in KNOWLEDGE_SPACES:
+        root = workspace / space
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for current, names, _ in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            names[:] = [
+                name
+                for name in names
+                if not name.startswith(".")
+                and name not in EXCLUDED_PARTS
+                and not (current_path / name).is_symlink()
+            ]
+            for name in names:
+                path = current_path / name
+                relative = path.relative_to(workspace).as_posix()
+                directories.append({"path": relative, "space": space})
     return sorted(directories, key=lambda item: item["path"].casefold())
 
 

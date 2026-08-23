@@ -110,7 +110,7 @@
 
   function openCreateNote(request = {}) {
     newSpace = request.space || 'manual';
-    const base = request.basePath || '';
+    const base = request.basePath || newSpace;
     newPath = base ? `${base.replace(/\/$/, '')}/` : '';
     newError = '';
     createModalOpen = true;
@@ -158,10 +158,13 @@
     <main class="main-content">
       {#if loading}
         <div class="loading-state full"><LoaderCircle class="spin" size={25} /> Preparing your knowledge spaces…</div>
-      {:else if route.view === 'chat'}
-        <ChatPage {authStatus} {files} initialPrompt={chatPrompt} initialContext={chatContext} onLogin={() => authModalOpen = true} onFilesChanged={refreshFiles} onOpenSource={openFile} />
       {:else}
-        <NotesWorkspace {files} {directories} selectedPath={route.path || ''} onOpen={openFile} onNewNote={openCreateNote} onDeleted={() => navigate('notes')} onChat={openChat} onChanged={refreshFiles} />
+        <div class="route-view" hidden={route.view !== 'chat'}>
+          <ChatPage {authStatus} {files} initialPrompt={chatPrompt} initialContext={chatContext} onLogin={() => authModalOpen = true} onFilesChanged={refreshFiles} onOpenSource={openFile} />
+        </div>
+        <div class="route-view" hidden={route.view !== 'notes'}>
+          <NotesWorkspace {files} {directories} selectedPath={route.view === 'notes' ? route.path || '' : ''} onOpen={openFile} onNewNote={openCreateNote} onDeleted={() => navigate('notes')} onChat={openChat} onChanged={refreshFiles} />
+        </div>
       {/if}
     </main>
   </div>
@@ -189,8 +192,8 @@
   <div class="modal-backdrop">
     <button class="backdrop-dismiss" onclick={() => createModalOpen = false} aria-label="Close new note dialog"></button>
     <form class="create-modal" onsubmit={(event) => { event.preventDefault(); createNote(); }}>
-      <div class="auth-icon"><FilePlus2 size={23} /></div><p class="eyebrow">NEW {newSpace.toUpperCase()} NOTE</p><h2>{newSpace === 'wiki' ? 'Add a Wiki page directly.' : 'Write something of your own.'}</h2><p>{newSpace === 'wiki' ? 'Direct edits are allowed, but do not receive agent provenance or an undo receipt.' : 'Manual notes remain at the path you choose and are never rewritten by the agent unless you explicitly ask.'}</p>
-      <label>Relative Markdown path<input bind:value={newPath} placeholder="research/new-idea.md" /></label>
+      <div class="auth-icon"><FilePlus2 size={23} /></div><p class="eyebrow">NEW {newSpace.toUpperCase()} NOTE</p><h2>{newSpace === 'wiki' ? 'Add a Wiki page directly.' : 'Write something of your own.'}</h2><p>{newSpace === 'wiki' ? 'Direct edits are allowed, but do not receive agent provenance or an undo receipt.' : 'Manual notes live below manual/ and are never rewritten by the agent unless you explicitly ask.'}</p>
+      <label>Relative Markdown path<input bind:value={newPath} placeholder="manual/research/new-idea.md" /></label>
       {#if newError}<p class="form-error">{newError}</p>{/if}
       <div class="modal-actions"><button type="button" class="secondary-button" onclick={() => createModalOpen = false}>Cancel</button><button class="primary-button" disabled={!newPath.trim()}>Create note</button></div>
     </form>

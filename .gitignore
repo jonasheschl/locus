@@ -17,8 +17,8 @@ backend/**/__pycache__/
 *.pyc
 .coverage
 
-# This repository lives inside the knowledge workspace. Track application code and its contract,
-# not the owner's data, regardless of file type.
+# This repository is the application sibling of the knowledge spaces. Track application code and
+# its bundled contract, not the owner's data, regardless of file type.
 /*
 !/.dockerignore
 !/.gitignore
@@ -28,3 +28,11 @@ backend/**/__pycache__/
 !/backend/
 !/docker-compose.yml
 !/frontend/
+!/agent-workspace/
+/agent-workspace/*
+!/agent-workspace/control/
+/agent-workspace/control/*
+!/agent-workspace/control/.gitkeep
+!/agent-workspace/work/
+/agent-workspace/work/*
+!/agent-workspace/work/.gitkeep

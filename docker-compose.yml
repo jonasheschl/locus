@@ -9,13 +9,20 @@ services:
       - "127.0.0.1:7331:8000"
     volumes:
       - type: bind
-        source: .
+        source: ..
         target: /workspace
+      - type: bind
+        source: ./agent-workspace/control
+        target: /run/locus-agent
     environment:
       WIKI_WORKSPACE: /workspace
-      WIKI_DATABASE: /workspace/wiki.sqlite3
+      WIKI_DATABASE: /workspace/locus/wiki.sqlite3
+      WIKI_CONTRACT: /app/AGENTS.md
       WIKI_MODEL: ${WIKI_MODEL:-gpt-5.5}
       WIKI_SCAN_INTERVAL: ${WIKI_SCAN_INTERVAL:-3}
+      WIKI_MANUAL_INTEGRATION_INTERVAL: ${WIKI_MANUAL_INTEGRATION_INTERVAL:-60}
+      WIKI_AGENT_WORKSPACE: /workspace/locus/agent-workspace/work
+      WIKI_WORKSPACE_RUNTIME_SOCKET: /run/locus-agent/runtime.sock
     user: "${UID:-1000}:${GID:-1000}"
     read_only: true
     tmpfs:
@@ -26,9 +33,66 @@ services:
       - no-new-privileges:true
     init: true
     restart: unless-stopped
+    depends_on:
+      workspace-runtime:
+        condition: service_healthy
+    networks:
+      - wiki-egress
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 10s
       timeout: 4s
       retries: 5
       start_period: 15s
+
+  workspace-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - /bin/sh
+      - -lc
+      - umask 000 && exec uvicorn app.workspace_runtime:app --uds /run/locus-agent/runtime.sock --no-access-log
+    volumes:
+      - type: bind
+        source: ./agent-workspace/work
+        target: /workspace
+      - type: bind
+        source: ./agent-workspace/control
+        target: /run/locus-agent
+      - type: bind
+        source: ../manual
+        target: /knowledge/manual
+        read_only: true
+      - type: bind
+        source: ../ingest
+        target: /knowledge/ingest
+        read_only: true
+      - type: bind
+        source: ../wiki
+        target: /knowledge/wiki
+        read_only: true
+    user: "${UID:-1000}:${GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 2g
+    init: true
+    restart: unless-stopped
+    networks:
+      - agent-egress
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--unix-socket", "/run/locus-agent/runtime.sock", "http://localhost/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+networks:
+  wiki-egress:
+  agent-egress:

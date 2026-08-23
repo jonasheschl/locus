@@ -15,8 +15,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY backend/requirements.txt /app/backend/requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl ripgrep \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 COPY backend/app /app/backend/app
+COPY AGENTS.md /app/AGENTS.md
 COPY --from=frontend-build /build/frontend/dist /app/frontend/dist
 
 EXPOSE 8000

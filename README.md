@@ -5,9 +5,9 @@ primary pages:
 
 - **Chat** is the default workbench. One conversational agent decides whether it needs to answer
   from the Wiki, inspect raw sources, lint structure, or persist an explicitly requested change.
-- **Notes** is an Obsidian-style raw file explorer. Browse directories, render Markdown, inspect
-  source text, edit authored notes, and preview extracted text from ingest files. Right-click a
-  root, directory, or file to create, rename, or delete entries.
+- **Notes** is an Obsidian-style file explorer. Browse directories, edit Markdown in a visual
+  WYSIWYG surface, inspect spreadsheet notes as sheet grids, and preview extracted ingest text.
+  Right-click a root, directory, or file to create, import, rename, or delete entries.
 
 The application combines Svelte, FastAPI, SQLite full-text/local similarity search, and a custom
 OpenAI Agents SDK agent.
@@ -17,6 +17,7 @@ OpenAI Agents SDK agent.
 Requirements: Docker Engine with Docker Compose.
 
 ```bash
+cd locus
 docker compose up --build
 ```
 
@@ -34,40 +35,50 @@ docker compose down
 
 ### Manual
 
-Manual is the Markdown you authored. Existing Markdown files and directories stay exactly where
-they are and are classified as Manual unless they live below `ingest/` or `wiki/`. Nothing is moved
-during migration. New Manual notes also use the relative path you choose.
+`../manual/` contains the notes you author. Markdown is edited visually while remaining Markdown
+on disk. ODS, XLSX, and CSV files can be imported from the Manual tree and are rendered as local
+sheet grids; their cell text is included in search and is available to the chat agent.
 
 The agent may read Manual freely, but its instructions and tools only permit changing an existing
 Manual note after an explicit request from you.
 
+Locus checks Manual integration state at least once per minute. New and modified notes are batched
+into the same agent workflow used for explicit Wiki updates; deleted notes trigger a review of Wiki
+claims that depended on them. Successful snapshot hashes are stored in `wiki.sqlite3`, so unchanged
+notes are not repeatedly sent to Codex. Failed runs—such as while Codex is logged out—remain pending
+and retry on a later interval.
+
 ### Ingest
 
-`./ingest/` contains raw external inputs. The Chat page can add:
+`../ingest/` contains raw external inputs. The Chat page can add:
 
 - PDF
 - Markdown and text
 - HTML/web exports
 - CSV and JSON
-- HTTP/HTTPS bookmarks
+- Downloaded HTTP/HTTPS sources
 
-PDF and text-like content is extracted locally for search and agent reading. A URL is currently
-stored as a Markdown source bookmark under `ingest/web/`; Locus does not silently fetch the page.
-That keeps the acquisition policy explicit while downloaded or exported pages can be uploaded.
+PDF and text-like content is extracted locally for search and agent reading. Downloaded HTML is
+converted to structured Markdown locally with Docling, while the immutable original HTML remains
+under `ingest/web/`. URLs added through the source menu—or included directly in a chat message—are
+downloaded as their original HTML, PDF, text, CSV, or JSON representation. Redirects are checked,
+downloads are limited to 50 MB, and local/private-network targets are rejected. Reusing the same
+URL attaches the already stored source rather than creating another copy.
 
 Ingest is immutable through the note editor and through the agent. To replace a source, change the
 raw file outside Locus or add a newer source.
 
 ### Wiki
 
-`./wiki/` contains synthesized, interlinked Markdown pages. This is the agent's normal write
+`../wiki/` contains synthesized, interlinked Markdown pages. This is the agent's normal write
 target when you ask it to integrate sources, consolidate topics, or maintain the wiki. Wiki pages
 are expected to link their Manual/Ingest provenance and related Wiki pages using exact relative
 paths. You can still inspect and edit them directly from Notes when needed.
 
-`AGENTS.md` is the editable maintenance contract. `wiki/index.md` is rebuilt after every
-Wiki-changing agent operation, while `wiki/log.md` is an append-only operational history. Locus
-creates all three automatically when they are missing.
+`locus/AGENTS.md` is the editable maintenance contract bundled into the application.
+`wiki/index.md` is rebuilt after every Wiki-changing agent operation, while `wiki/log.md` is an
+append-only operational history. Locus creates the three knowledge roots and special Wiki files
+when they are missing.
 
 ## One agent, autonomous workflow
 
@@ -75,6 +86,14 @@ There are no chat modes and no agent switcher. Every conversation starts with th
 `wiki/index.md`. The same agent can answer from the Wiki, return to Manual/Ingest for evidence,
 review an attached source, lint the knowledge structure, or carry out an explicitly requested
 integration or repair.
+
+For longer jobs, that same agent also has a standard shell in a persistent Docker workspace. It
+can inspect large sets of notes, download multi-page sources, run Docling, and keep intermediate
+artifacts across tool calls. The runtime sees Manual, Ingest, and Wiki read-only and has no access
+to the Locus source tree, SQLite credentials, or the main application network. Completed external
+files leave the workspace through an Ingest outbox; Locus validates, imports, and indexes them,
+while Wiki changes continue through the normal audited write operation. Agent runs may use up to
+64 model turns rather than stopping after a short fixed sequence.
 
 Reading, questioning, and source review do not create write operations. A tracked operation begins
 lazily only when the agent actually invokes a write tool. It returns a receipt containing sources
@@ -85,14 +104,15 @@ a request that explicitly names the note.
 ## Index and storage
 
 - Changes made in another editor are detected every few seconds. Locus writes Markdown atomically.
+- Only `manual/`, `ingest/`, and `wiki/` are indexed; the neighboring `locus/` application is
+  structurally outside the knowledge spaces.
 - Search scans all three spaces and combines SQLite FTS5 with deterministic 256-dimensional local
   hash embeddings.
 - PDF extraction, indexes, embeddings, links, chat history, and Codex credentials are stored in
   `./wiki.sqlite3`. The database is created with user-only (`0600`) permissions.
 - Operation snapshots, provenance, source integration status, and undo metadata are also stored in
   that same SQLite file. No sidecar cache directory is used.
-- The implementation folders, hidden folders, this README, and unsupported files outside
-  `ingest/` are excluded from indexing.
+- Application and database files stay below `locus/` and are excluded from indexing by design.
 - Space roots plus `wiki/index.md` and `wiki/log.md` are protected from rename/delete. Folder
   deletion is limited to empty folders so unrelated files cannot disappear recursively.
 
@@ -120,14 +140,18 @@ file.
 ## Configuration
 
 ```bash
-WIKI_MODEL=gpt-5.5 WIKI_SCAN_INTERVAL=5 docker compose up --build
+WIKI_MODEL=gpt-5.5 WIKI_SCAN_INTERVAL=5 WIKI_MANUAL_INTEGRATION_INTERVAL=60 docker compose up --build
 ```
 
 The selected model must be available to the signed-in account.
 
+`WIKI_MANUAL_INTEGRATION_INTERVAL` defaults to 60 seconds and is capped at 60 seconds so Manual
+changes are always considered at least once per minute.
+
 The sidebar **Settings** dialog can override the model and reasoning effort, enable Fast mode, and
 show the connected Codex account's current allowance windows, reset times, and credit status.
-Fast mode requests priority processing independently of reasoning effort. Choices are stored in
+Fast mode requests Codex priority processing independently of reasoning effort. Locus sends both
+the `service_tier=priority` payload field and Codex priority routing hint. Choices are stored in
 `wiki.sqlite3`, take effect on the next agent turn, and survive container restarts. The environment
 model remains the fallback when no runtime choice has been saved.
 
@@ -158,6 +182,6 @@ Useful endpoints include `/api/health`, `/api/docs`, `/api/files`, `/api/search`
 `/api/operations/{id}/undo`, `/api/settings`, `/api/auth/codex/usage`,
 `/api/files/move`, and `/api/index/refresh`.
 
-The repository ignore rules intentionally exclude personal Markdown, spreadsheets, `ingest/`,
-`wiki/`, and `wiki.sqlite3`. Only application code and the editable `AGENTS.md` contract belong in
-source control by default.
+The Git repository itself lives in `locus/`. The sibling knowledge spaces are therefore outside
+source control, while `wiki.sqlite3` remains ignored inside the repository. Only application code
+and the editable `AGENTS.md` contract belong in source control by default.

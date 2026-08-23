@@ -86,3 +86,19 @@ def test_special_wiki_files_are_not_agent_writable(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="maintained by the application"):
         operations.write_wiki(operation_id, "index.md", "# Replaced")
+
+
+def test_generated_index_excerpt_does_not_create_source_links(tmp_path: Path) -> None:
+    _, _, operations = operation_manager(tmp_path)
+    operation_id = operations.start("maintain", "Create sourced topic", None)
+    operations.write_wiki(
+        operation_id,
+        "topic.md",
+        "# Topic\n\nGrounded in [[ingest/source-page.html|the source page]].\n",
+    )
+
+    operations.complete(operation_id, "Created a sourced topic.")
+
+    index = (tmp_path / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "— Grounded in the source page." in index
+    assert "[[ingest/source-page.html" not in index

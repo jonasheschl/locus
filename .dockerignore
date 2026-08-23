@@ -7,5 +7,7 @@ frontend/node_modules
 frontend/dist
 wiki.sqlite3
 wiki.sqlite3-*
+agent-workspace
 *.md
+!AGENTS.md
 *.ods

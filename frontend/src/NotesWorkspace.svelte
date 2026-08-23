@@ -10,6 +10,7 @@
     FileInput,
     FilePenLine,
     FilePlus2,
+    FileSpreadsheet,
     FileText,
     Folder,
     FolderOpen,
@@ -21,10 +22,13 @@
     Save,
     Search,
     Trash2,
+    Upload,
     X
   } from '@lucide/svelte';
   import Markdown from './Markdown.svelte';
-  import { api, getIngestItem, getNote } from './api.js';
+  import MarkdownEditor from './MarkdownEditor.svelte';
+  import SpreadsheetViewer from './SpreadsheetViewer.svelte';
+  import { api, getIngestItem, getNote, getSpreadsheet } from './api.js';
 
   export let files = [];
   export let directories = [];
@@ -37,7 +41,7 @@
 
   const spaceMeta = {
     manual: { label: 'Manual', description: 'Your authored notes, preserved as written', icon: FilePenLine },
-    ingest: { label: 'Ingest', description: 'Raw external material and source bookmarks', icon: FileInput },
+    ingest: { label: 'Ingest', description: 'Raw external material and downloaded websites', icon: FileInput },
     wiki: { label: 'Wiki', description: 'Interlinked synthesis maintained with the agent', icon: BookOpenText }
   };
 
@@ -47,12 +51,13 @@
   let loadedPath = '';
   let loading = false;
   let error = '';
-  let mode = 'preview';
   let editing = false;
   let draft = '';
   let saving = false;
   let saved = false;
   let contextMenu = null;
+  let spreadsheetInput;
+  let spreadsheetFolder = 'manual';
 
   $: tree = buildTree(files, directories, filter, expanded);
   $: if (selectedPath && selectedPath !== loadedPath) load(selectedPath);
@@ -68,10 +73,13 @@
     loading = true;
     error = '';
     editing = false;
-    mode = 'preview';
     try {
       const file = files.find((candidate) => candidate.path === path);
-      item = file?.kind === 'asset' ? await getIngestItem(path) : await getNote(path);
+      item = file?.kind === 'asset'
+        ? await getIngestItem(path)
+        : file?.kind === 'spreadsheet'
+          ? await getSpreadsheet(path)
+          : await getNote(path);
       draft = item.content || '';
     } catch (cause) {
       error = cause.message;
@@ -98,7 +106,7 @@
       const filesAt = new Map();
       for (const item of sourceDirectories.filter((directory) => directory.space === space)) {
         let relative = item.path;
-        if ((space === 'ingest' || space === 'wiki') && relative.toLowerCase().startsWith(`${space}/`)) relative = relative.slice(space.length + 1);
+        if (relative.toLowerCase().startsWith(`${space}/`)) relative = relative.slice(space.length + 1);
         const parts = relative.split('/').filter(Boolean);
         for (let index = 1; index <= parts.length; index += 1) {
           const dir = parts.slice(0, index).join('/');
@@ -109,7 +117,7 @@
       }
       for (const file of group) {
         let relative = file.path;
-        if ((space === 'ingest' || space === 'wiki') && relative.toLowerCase().startsWith(`${space}/`)) relative = relative.slice(space.length + 1);
+        if (relative.toLowerCase().startsWith(`${space}/`)) relative = relative.slice(space.length + 1);
         const parts = relative.split('/');
         const parent = parts.slice(0, -1).join('/');
         if (!filesAt.has(parent)) filesAt.set(parent, []);
@@ -124,7 +132,7 @@
       const visit = (parent, depth) => {
         for (const directory of Array.from(directories.get(parent) || []).sort()) {
           const key = `${space}:${directory}`;
-          rows.push({ type: 'folder', space, key, name: directory.split('/').at(-1), depth, path: space === 'manual' ? directory : `${space}/${directory}` });
+          rows.push({ type: 'folder', space, key, name: directory.split('/').at(-1), depth, path: `${space}/${directory}` });
           if (openFolders.has(key)) visit(directory, depth + 1);
         }
         for (const file of (filesAt.get(parent) || []).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -144,6 +152,7 @@
 
   function fileIcon(file) {
     if (file.extension === '.md') return FileText;
+    if (file.kind === 'spreadsheet') return FileSpreadsheet;
     if (['.html', '.htm', '.json'].includes(file.extension)) return FileCode2;
     return File;
   }
@@ -200,7 +209,7 @@
   function rowPath(row) {
     if (row.type === 'file') return row.file.path;
     if (row.type === 'folder') return row.path;
-    return row.space === 'manual' ? '' : row.space;
+    return row.space;
   }
 
   function parentPath(path) {
@@ -215,6 +224,10 @@
     return rowSpace(row) !== 'ingest';
   }
 
+  function canImportSpreadsheet(row) {
+    return rowSpace(row) === 'manual';
+  }
+
   function canMutate(row) {
     return row.type !== 'space' && !['wiki/index.md', 'wiki/log.md'].includes(rowPath(row));
   }
@@ -222,6 +235,26 @@
   function requestNewNote(row) {
     contextMenu = null;
     onNewNote({ space: rowSpace(row), basePath: creationBase(row) });
+  }
+
+  function requestSpreadsheet(row) {
+    contextMenu = null;
+    spreadsheetFolder = creationBase(row) || 'manual';
+    spreadsheetInput?.click();
+  }
+
+  async function uploadSpreadsheet(event) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    form.append('folder', spreadsheetFolder);
+    try {
+      const created = await api('/api/manual/spreadsheet', { method: 'POST', body: form });
+      await onChanged();
+      onOpen(created);
+    } catch (cause) { error = cause.message; }
   }
 
   async function createFolder(row) {
@@ -303,35 +336,39 @@
     {:else if error && !item}
       <div class="viewer-state error-state">{error}</div>
     {:else if item}
-      <header class="file-tabs">
-        <div class="open-tab"><svelte:component this={selectedFile ? fileIcon(selectedFile) : FileText} size={14} /><span>{item.path.split('/').at(-1)}</span><small class={item.space}>{item.space}</small></div>
-        <div class="viewer-actions">
-          {#if saved}<span class="saved-label"><Check size={13} /> Saved</span>{/if}
-          {#if item.kind === 'asset'}
-            <button class="secondary-button" onclick={() => onChat({ prompt: `Answer questions about [[${item.path}]].`, context: [item.path] })}><MessageCircle size={14} /> Ask</button><button class="primary-button" onclick={() => onChat({ prompt: `Integrate [[${item.path}]] into the Wiki. Update every relevant durable page, cross-link related knowledge, and preserve provenance.`, context: [item.path] })}>Integrate</button><a class="secondary-button" href={`/api/ingest/files/${encodeURIComponent(item.path)}`} target="_blank" rel="noreferrer">Original <ExternalLink size={14} /></a>
-          {:else if editing}
-            <button class="secondary-button" onclick={() => { editing = false; draft = item.content; }}><X size={14} /> Cancel</button><button class="primary-button" onclick={save} disabled={saving}><Save size={14} /> {saving ? 'Saving…' : 'Save'}</button>
-          {:else}
-            <button class="secondary-button" onclick={() => onChat({ prompt: `Work with [[${item.path}]].`, context: [item.path] })}><MessageCircle size={14} /> Discuss</button>
-            {#if item.space === 'ingest'}<button class="primary-button" onclick={() => onChat({ prompt: `Integrate [[${item.path}]] into the Wiki. Update every relevant durable page, cross-link related knowledge, and preserve provenance.`, context: [item.path] })}>Integrate</button>{/if}
-            {#if item.space === 'manual'}<button class="secondary-button" onclick={() => onChat({ prompt: `Integrate the durable knowledge in [[${item.path}]] into the Wiki.`, context: [item.path] })}>Integrate</button>{/if}
-            {#if item.space === 'wiki'}<button class="secondary-button" onclick={() => onChat({ prompt: `Maintain [[${item.path}]]. Check its provenance, links, and consistency with the rest of the Wiki.`, context: [item.path] })}>Maintain</button>{/if}
-            {#if item.space !== 'ingest'}<button class="secondary-button" onclick={() => { editing = true; mode = 'source'; }}>Edit</button>{/if}
-          {/if}
-        </div>
-      </header>
       <div class="viewer-body">
         <div class="viewer-breadcrumb">{item.path}</div>
-        <div class="file-title-row"><div><span class={`space-label ${item.space}`}>{item.space}</span><h1>{item.title}</h1><p>{item.word_count?.toLocaleString() || 0} words · {(item.size / 1024).toFixed(1)} KB</p></div>
-          {#if item.kind !== 'asset' && !editing}<div class="view-switch"><button class:active={mode === 'preview'} onclick={() => mode = 'preview'}>Reading</button><button class:active={mode === 'source'} onclick={() => mode = 'source'}>Source</button></div>{/if}
+        <div class="file-title-row">
+          <div><span class={`space-label ${item.space}`}>{item.space}</span><h1>{item.title}</h1><p>{item.kind === 'spreadsheet' ? `${item.sheets.length} sheet${item.sheets.length === 1 ? '' : 's'}` : `${item.word_count?.toLocaleString() || 0} words`} · {(item.size / 1024).toFixed(1)} KB</p></div>
+          <div class="viewer-actions">
+            {#if saved}<span class="saved-label"><Check size={13} /> Saved</span>{/if}
+            {#if item.kind === 'asset'}
+              <button class="secondary-button" onclick={() => onChat({ prompt: `Answer questions about [[${item.path}]].`, context: [item.path] })}><MessageCircle size={14} /> Ask</button><button class="primary-button" onclick={() => onChat({ prompt: `Integrate [[${item.path}]] into the Wiki. Update every relevant durable page, cross-link related knowledge, and preserve provenance.`, context: [item.path] })}>Integrate</button><a class="secondary-button" href={`/api/ingest/files/${encodeURIComponent(item.path)}`} target="_blank" rel="noreferrer">Original <ExternalLink size={14} /></a>
+            {:else if editing}
+              <button class="secondary-button" onclick={() => { editing = false; draft = item.content; }}><X size={14} /> Cancel</button><button class="primary-button" onclick={save} disabled={saving}><Save size={14} /> {saving ? 'Saving…' : 'Save'}</button>
+            {:else}
+              <button class="secondary-button" onclick={() => onChat({ prompt: `Work with [[${item.path}]].`, context: [item.path] })}><MessageCircle size={14} /> Discuss</button>
+              {#if item.space === 'ingest'}<button class="primary-button" onclick={() => onChat({ prompt: `Integrate [[${item.path}]] into the Wiki. Update every relevant durable page, cross-link related knowledge, and preserve provenance.`, context: [item.path] })}>Integrate</button>{/if}
+              {#if item.space === 'manual'}<button class="secondary-button" onclick={() => onChat({ prompt: `Integrate the durable knowledge in [[${item.path}]] into the Wiki.`, context: [item.path] })}>Integrate</button>{/if}
+              {#if item.space === 'wiki'}<button class="secondary-button" onclick={() => onChat({ prompt: `Maintain [[${item.path}]]. Check its provenance, links, and consistency with the rest of the Wiki.`, context: [item.path] })}>Maintain</button>{/if}
+              {#if selectedFile?.editable}<button class="secondary-button" onclick={() => { editing = true; }}>Edit visually</button>{/if}
+            {/if}
+          </div>
         </div>
         {#if item.extraction_error}<p class="extraction-warning">{item.extraction_error}</p>{/if}
         {#if editing}
-          <textarea class="raw-editor" bind:value={draft} spellcheck="true"></textarea>
+          <MarkdownEditor content={draft} onChange={(content) => draft = content} />
         {:else if item.kind === 'asset'}
-          <article class="extracted-source"><span class="section-label">EXTRACTED TEXT</span><pre>{item.content || 'No searchable text could be extracted from this file.'}</pre></article>
-        {:else if mode === 'source'}
-          <pre class="source-code">{item.content}</pre>
+          <article class="extracted-source">
+            <span class="section-label">{item.media_type === 'text/html' ? 'DOCLING MARKDOWN' : 'EXTRACTED TEXT'}</span>
+            {#if item.media_type === 'text/html'}
+              <div class="reading-pane"><Markdown content={item.content || 'No searchable content could be extracted from this website.'} /></div>
+            {:else}
+              <pre>{item.content || 'No searchable text could be extracted from this file.'}</pre>
+            {/if}
+          </article>
+        {:else if item.kind === 'spreadsheet'}
+          <SpreadsheetViewer sheets={item.sheets} />
         {:else}
           <article class="reading-pane"><Markdown content={item.content} /></article>
         {/if}
@@ -359,9 +396,12 @@
   {/if}
 </section>
 
+<input class="visually-hidden" bind:this={spreadsheetInput} type="file" accept=".ods,.xlsx,.csv" onchange={uploadSpreadsheet} />
+
 {#if contextMenu}
   <div class="tree-context-menu" style={`left:${contextMenu.x}px;top:${contextMenu.y}px`} role="menu">
     {#if canCreateNote(contextMenu.row)}<button onclick={(event) => { event.stopPropagation(); requestNewNote(contextMenu.row); }}><FilePlus2 size={14} /> New note</button>{/if}
+    {#if canImportSpreadsheet(contextMenu.row)}<button onclick={(event) => { event.stopPropagation(); requestSpreadsheet(contextMenu.row); }}><Upload size={14} /> Import spreadsheet</button>{/if}
     <button onclick={(event) => { event.stopPropagation(); createFolder(contextMenu.row); }}><FolderPlus size={14} /> New folder</button>
     {#if canMutate(contextMenu.row)}
       <span></span>

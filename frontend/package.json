@@ -9,8 +9,16 @@
     "check": "svelte-check --tsconfig ./jsconfig.json"
   },
   "dependencies": {
-    "dompurify": "^3.2.6",
     "@lucide/svelte": "^0.540.0",
+    "@tiptap/core": "^3.30.2",
+    "@tiptap/extension-table": "^3.30.2",
+    "@tiptap/extension-table-cell": "^3.30.2",
+    "@tiptap/extension-table-header": "^3.30.2",
+    "@tiptap/extension-table-row": "^3.30.2",
+    "@tiptap/markdown": "^3.30.2",
+    "@tiptap/pm": "^3.30.2",
+    "@tiptap/starter-kit": "^3.30.2",
+    "dompurify": "^3.2.6",
     "marked": "^16.2.1",
     "svelte": "^5.38.7"
   },
