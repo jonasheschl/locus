@@ -1,0 +1,30 @@
+wiki.sqlite3
+wiki.sqlite3-shm
+wiki.sqlite3-wal
+ingest/
+wiki/
+*.md
+!README.md
+!AGENTS.md
+*.ods
+frontend/node_modules/
+frontend/dist/
+backend/.pytest_cache/
+backend/**/__pycache__/
+.pytest_cache/
+.agents/
+.codex/
+*.pyc
+.coverage
+
+# This repository lives inside the knowledge workspace. Track application code and its contract,
+# not the owner's data, regardless of file type.
+/*
+!/.dockerignore
+!/.gitignore
+!/AGENTS.md
+!/Dockerfile
+!/README.md
+!/backend/
+!/docker-compose.yml
+!/frontend/

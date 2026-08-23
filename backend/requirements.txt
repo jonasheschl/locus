@@ -1,0 +1,8 @@
+fastapi==0.139.2
+uvicorn[standard]==0.35.0
+httpx==0.28.1
+openai-agents==0.22.0
+openai==3.0.0
+pydantic==2.12.3
+pypdf==6.15.0
+python-multipart==0.0.32
