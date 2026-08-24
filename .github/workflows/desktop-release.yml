@@ -47,7 +47,6 @@ jobs:
           channel_dir="$channel_root/channel"
           git worktree add --detach "$channel_dir"
           git -C "$channel_dir" switch --orphan desktop-updates
-          git -C "$channel_dir" rm -rf .
           mkdir -p "$channel_dir/$GITHUB_REF_NAME"
           cp frontend/desktop-dist/update.json "$channel_dir/update.json"
           cp frontend/desktop-dist/locus/resources.neu "$channel_dir/$GITHUB_REF_NAME/resources.neu"
