@@ -16,10 +16,10 @@ jobs:
         working-directory: frontend
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -43,7 +43,8 @@ jobs:
       - name: Publish webview-compatible update channel
         working-directory: ${{ github.workspace }}
         run: |
-          channel_dir="$(mktemp -d)"
+          channel_root="$(mktemp -d)"
+          channel_dir="$channel_root/channel"
           git worktree add --detach "$channel_dir"
           git -C "$channel_dir" switch --orphan desktop-updates
           git -C "$channel_dir" rm -rf .
