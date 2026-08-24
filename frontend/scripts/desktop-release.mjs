@@ -38,7 +38,7 @@ if (command === 'manifest') {
   const manifest = {
     applicationId: 'at.jonas.locus',
     version,
-    resourcesURL: `https://github.com/${repository}/releases/download/${tag}/resources.neu`
+    resourcesURL: `https://raw.githubusercontent.com/${repository}/desktop-updates/${tag}/resources.neu`
   };
 
   await mkdir('desktop-dist', { recursive: true });

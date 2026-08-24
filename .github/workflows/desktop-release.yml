@@ -40,6 +40,22 @@ jobs:
       - name: Create update manifest
         run: node scripts/desktop-release.mjs manifest "$GITHUB_REF_NAME"
 
+      - name: Publish webview-compatible update channel
+        working-directory: ${{ github.workspace }}
+        run: |
+          channel_dir="$(mktemp -d)"
+          git worktree add --detach "$channel_dir"
+          git -C "$channel_dir" switch --orphan desktop-updates
+          git -C "$channel_dir" rm -rf .
+          mkdir -p "$channel_dir/$GITHUB_REF_NAME"
+          cp frontend/desktop-dist/update.json "$channel_dir/update.json"
+          cp frontend/desktop-dist/locus/resources.neu "$channel_dir/$GITHUB_REF_NAME/resources.neu"
+          git -C "$channel_dir" add update.json "$GITHUB_REF_NAME/resources.neu"
+          git -C "$channel_dir" config user.name github-actions[bot]
+          git -C "$channel_dir" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$channel_dir" commit -m "Publish desktop update $GITHUB_REF_NAME"
+          git -C "$channel_dir" push --force origin HEAD:desktop-updates
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -66,9 +66,10 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The desktop release workflow builds the cross-platform package and publishes `update.json`,
-`resources.neu`, and the portable release ZIP. These assets must be publicly downloadable; if the
-repository is private, configure `VITE_UPDATE_MANIFEST_URL` to use a public update host instead.
+The desktop release workflow builds the cross-platform package, publishes the portable files to a
+GitHub Release, and force-publishes the current update manifest and versioned resource bundle to
+the public `desktop-updates` branch. If the repository is private, configure
+`VITE_UPDATE_MANIFEST_URL` to use a public update host instead.
 Neutralino's built-in updater replaces the app resources, not the Neutralino runtime executable;
 runtime upgrades still require replacing the portable package.
 
