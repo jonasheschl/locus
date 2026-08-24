@@ -13,9 +13,10 @@ from typing import Any, Literal
 from urllib.parse import unquote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from .agent_service import WikiAgent
@@ -239,6 +240,12 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=["localhost", "127.0.0.1", "testserver", "wiki"],
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:7332", "http://127.0.0.1:7332"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
 
     @app.middleware("http")

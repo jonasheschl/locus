@@ -9,6 +9,11 @@ wiki/
 *.ods
 frontend/node_modules/
 frontend/dist/
+frontend/bin/
+frontend/desktop-dist/
+frontend/.tmp/
+frontend/*.neu
+frontend/neutralinojs.log
 backend/.pytest_cache/
 backend/**/__pycache__/
 .pytest_cache/
@@ -22,6 +27,8 @@ backend/**/__pycache__/
 /*
 !/.dockerignore
 !/.gitignore
+!/.github/
+!/.github/**
 !/AGENTS.md
 !/Dockerfile
 !/README.md

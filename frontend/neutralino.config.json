@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
+  "applicationId": "at.jonas.locus",
+  "applicationName": "Locus",
+  "version": "1.0.0",
+  "description": "A private, local-first knowledge wiki.",
+  "defaultMode": "window",
+  "port": 7332,
+  "documentRoot": "/dist/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "enableExtensions": false,
+  "exportAuthInfo": false,
+  "singlePageServe": true,
+  "tokenSecurity": "one-time",
+  "nativeAllowList": [
+    "app.exit",
+    "filesystem.writeBinaryFile",
+    "os.setTray",
+    "window.focus",
+    "window.hide",
+    "window.show",
+    "window.unminimize"
+  ],
+  "logging": {
+    "enabled": false,
+    "writeToLogFile": false
+  },
+  "modes": {
+    "window": {
+      "title": "Locus — Knowledge Wiki",
+      "width": 1440,
+      "height": 900,
+      "minWidth": 900,
+      "minHeight": 600,
+      "center": true,
+      "icon": "/dist/icons/locus-256.png",
+      "enableInspector": false,
+      "openInspectorOnStartup": false,
+      "resizable": true,
+      "exitProcessOnClose": false,
+      "useSavedState": true,
+      "injectGlobals": true,
+      "newWindowPolicy": "browser"
+    }
+  },
+  "cli": {
+    "binaryName": "locus",
+    "binaryVersion": "6.9.0",
+    "resourcesPath": "/dist/",
+    "distributionPath": "/desktop-dist",
+    "frontendLibrary": {
+      "patchFile": "/index.html",
+      "devUrl": "http://127.0.0.1:5173",
+      "projectPath": "/",
+      "devCommand": "npm run dev",
+      "buildCommand": "npm run build:desktop"
+    }
+  }
+}

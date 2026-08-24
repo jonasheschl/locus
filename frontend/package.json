@@ -6,10 +6,15 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "build:desktop": "vite build --mode desktop",
+    "desktop:update": "neu update",
+    "desktop:dev": "neu run",
+    "desktop:build": "neu build --release",
     "check": "svelte-check --tsconfig ./jsconfig.json"
   },
   "dependencies": {
     "@lucide/svelte": "^0.540.0",
+    "@neutralinojs/lib": "6.9.0",
     "@tiptap/core": "^3.30.2",
     "@tiptap/extension-table": "^3.30.2",
     "@tiptap/extension-table-cell": "^3.30.2",
@@ -23,6 +28,7 @@
     "svelte": "^5.38.7"
   },
   "devDependencies": {
+    "@neutralinojs/neu": "11.7.2",
     "@sveltejs/vite-plugin-svelte": "^6.1.2",
     "svelte-check": "^4.3.1",
     "vite": "^7.1.3"

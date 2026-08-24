@@ -26,7 +26,7 @@
   } from '@lucide/svelte';
   import Markdown from './Markdown.svelte';
   import AgentActivity from './AgentActivity.svelte';
-  import { api, getThread, getThreads } from './api.js';
+  import { api, apiUrl, getThread, getThreads } from './api.js';
 
   export let authStatus = { authenticated: false };
   export let files = [];
@@ -149,7 +149,7 @@
     streaming = true;
     statusMessage = 'Reading the Wiki and deciding what the conversation needs…';
     try {
-      const response = await fetch('/api/chat', {
+      const response = await fetch(apiUrl('/api/chat'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question,

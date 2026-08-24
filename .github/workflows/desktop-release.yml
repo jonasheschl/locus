@@ -1,0 +1,53 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set release version
+        run: node scripts/desktop-release.mjs prepare "$GITHUB_REF_NAME"
+
+      - name: Download Neutralino runtime
+        run: npm run desktop:update
+
+      - name: Build desktop package
+        run: npm run desktop:build
+
+      - name: Create update manifest
+        run: node scripts/desktop-release.mjs manifest "$GITHUB_REF_NAME"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          desktop-dist/locus-release.zip
+          desktop-dist/locus/resources.neu#resources.neu
+          desktop-dist/update.json#update.json
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --generate-notes

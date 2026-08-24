@@ -32,6 +32,46 @@ Locus supplies desktop-sized and maskable versions of its own icon. If the app w
 those assets were available, uninstall and reinstall it once so Chromium refreshes the operating
 system launcher files.
 
+### Neutralino desktop app
+
+The frontend also ships as a lightweight Neutralino desktop application. Keep the Docker Compose
+service running so the desktop UI can reach the Locus API at `http://127.0.0.1:7331`, then run:
+
+```bash
+cd frontend
+npm ci
+npm run desktop:update
+npm run desktop:dev
+```
+
+`desktop:update` downloads the pinned Neutralino runtime binaries and only needs to be rerun when
+the runtime version changes. To create release bundles for Linux, macOS, and Windows:
+
+```bash
+npm run desktop:build
+```
+
+The bundles are written below `frontend/desktop-dist/`. Closing or minimizing the window sends it
+to the system tray; use **Open Locus** to restore it and **Quit Locus** to exit. The native API is
+restricted to tray creation, window show/hide/focus, application exit, and writing the running
+app's own `resources.neu` update bundle. General filesystem reads/writes, shell, environment,
+clipboard, storage, extensions, and other system APIs are not exposed.
+
+The desktop app checks the latest GitHub Release when it starts. If that release has a newer
+version, it downloads and installs `resources.neu`, then offers to quit so the update is loaded on
+the next launch. Publish a release by pushing a semantic-version tag:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+The desktop release workflow builds the cross-platform package and publishes `update.json`,
+`resources.neu`, and the portable release ZIP. These assets must be publicly downloadable; if the
+repository is private, configure `VITE_UPDATE_MANIFEST_URL` to use a public update host instead.
+Neutralino's built-in updater replaces the app resources, not the Neutralino runtime executable;
+runtime upgrades still require replacing the portable package.
+
 To stop it:
 
 ```bash

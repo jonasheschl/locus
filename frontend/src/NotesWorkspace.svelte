@@ -29,7 +29,7 @@
   import Markdown from './Markdown.svelte';
   import MarkdownEditor from './MarkdownEditor.svelte';
   import SpreadsheetViewer from './SpreadsheetViewer.svelte';
-  import { api, getIngestItem, getNote, getSpreadsheet } from './api.js';
+  import { api, apiUrl, getIngestItem, getNote, getSpreadsheet } from './api.js';
 
   export let files = [];
   export let directories = [];
@@ -410,7 +410,7 @@
           <div class="viewer-actions">
             {#if saved}<span class="saved-label"><Check size={13} /> Saved</span>{/if}
             {#if item.kind === 'asset'}
-              <button class="secondary-button" onclick={() => onChat({ prompt: `Answer questions about [[${item.path}]].`, context: [item.path] })}><MessageCircle size={14} /> Ask</button><button class="primary-button" onclick={() => onChat({ prompt: `Integrate [[${item.path}]] into the Wiki. Update every relevant durable page, cross-link related knowledge, and preserve provenance.`, context: [item.path] })}>Integrate</button><a class="secondary-button" href={`/api/ingest/files/${encodeURIComponent(item.path)}`} target="_blank" rel="noreferrer">Original <ExternalLink size={14} /></a>
+              <button class="secondary-button" onclick={() => onChat({ prompt: `Answer questions about [[${item.path}]].`, context: [item.path] })}><MessageCircle size={14} /> Ask</button><button class="primary-button" onclick={() => onChat({ prompt: `Integrate [[${item.path}]] into the Wiki. Update every relevant durable page, cross-link related knowledge, and preserve provenance.`, context: [item.path] })}>Integrate</button><a class="secondary-button" href={apiUrl(`/api/ingest/files/${encodeURIComponent(item.path)}`)} target="_blank" rel="noreferrer">Original <ExternalLink size={14} /></a>
             {:else if editing}
               <button class="secondary-button" onclick={() => { editing = false; draft = item.content; }}><X size={14} /> Cancel</button><button class="primary-button" onclick={save} disabled={saving}><Save size={14} /> {saving ? 'Saving…' : 'Save'}</button>
             {:else}

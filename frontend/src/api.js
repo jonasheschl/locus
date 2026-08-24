@@ -1,6 +1,12 @@
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+
+export function apiUrl(path) {
+  return `${apiBaseUrl}${path}`;
+}
+
 export async function api(path, options = {}) {
   const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData;
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     ...options,
     headers: {
       ...(options.body && !isForm ? { 'Content-Type': 'application/json' } : {}),
