@@ -97,7 +97,8 @@
         .filter((file) => `${file.title} ${file.path}`.toLowerCase().includes(normalizedQuery))
         .map((file) => ({
           type: 'file', file, depth: 0, name: file.title,
-          ingestRoot: file.space === 'ingest', ingestedAt: file.ingested_at
+          ingestRoot: file.space === 'ingest', ingestedAt: file.ingested_at,
+          manualNote: file.space === 'manual', modifiedAt: manualModifiedAt(file)
         }))
         .sort((a, b) => {
           if (a.file.space === 'ingest' && b.file.space === 'ingest') {
@@ -155,7 +156,8 @@
         const childFiles = (filesAt.get(parent) || []).map((entry) => ({
           type: 'file', file: entry.file, name: entry.name, depth,
           ingestRoot: space === 'ingest' && parent === '',
-          ingestedAt: entry.file.ingested_at
+          ingestedAt: entry.file.ingested_at,
+          manualNote: space === 'manual', modifiedAt: manualModifiedAt(entry.file)
         }));
         const children = [...childDirectories, ...childFiles].sort((a, b) => {
           if (space === 'ingest' && parent === '') {
@@ -198,6 +200,11 @@
     return new Intl.DateTimeFormat(undefined, {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
     }).format(date);
+  }
+
+  function manualModifiedAt(file) {
+    if (file?.mtime_ns) return new Date(file.mtime_ns / 1_000_000).toISOString();
+    return file?.indexed_at || '';
   }
 
   async function save() {
@@ -360,13 +367,14 @@
             <span class={`space-icon ${row.space}`}><svelte:component this={spaceMeta[row.space].icon} size={13} /></span><strong>{spaceMeta[row.space].label}</strong><small>{row.count}</small>
           </button>
         {:else if row.type === 'folder'}
-          <button class:ingest-root={row.ingestRoot} class="tree-folder" style={`padding-left:${14 + row.depth * 13}px`} onclick={() => toggle(row.key)} oncontextmenu={(event) => showContextMenu(event, row)}>
-            {#if row.ingestRoot && row.ingestedAt}<time class="ingest-time" datetime={row.ingestedAt} title={`Ingested ${new Date(row.ingestedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.ingestedAt)}</time>{/if}
+          <button class:dated-row={row.ingestRoot} class="tree-folder" style={`padding-left:${14 + row.depth * 13}px`} onclick={() => toggle(row.key)} oncontextmenu={(event) => showContextMenu(event, row)}>
+            {#if row.ingestRoot && row.ingestedAt}<time class="file-date ingest-time" datetime={row.ingestedAt} title={`Ingested ${new Date(row.ingestedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.ingestedAt)}</time>{/if}
             {#if expanded.has(row.key)}<ChevronDown size={13} /><FolderOpen size={14} />{:else}<ChevronRight size={13} /><Folder size={14} />{/if}<span>{row.name}</span>
           </button>
         {:else}
-          <button class:active={selectedPath === row.file.path} class:ingest-root={row.ingestRoot} class="tree-file" style={`padding-left:${23 + row.depth * 13}px`} onclick={() => openFile(row.file)} oncontextmenu={(event) => showContextMenu(event, row)} title={row.file.path}>
-            {#if row.ingestRoot && row.ingestedAt}<time class="ingest-time" datetime={row.ingestedAt} title={`Ingested ${new Date(row.ingestedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.ingestedAt)}</time>{/if}
+          <button class:active={selectedPath === row.file.path} class:dated-row={row.ingestRoot || row.manualNote} class="tree-file" style={`padding-left:${23 + row.depth * 13}px`} onclick={() => openFile(row.file)} oncontextmenu={(event) => showContextMenu(event, row)} title={row.file.path}>
+            {#if row.manualNote && row.modifiedAt}<time class="file-date manual-time" datetime={row.modifiedAt} title={`Modified ${new Date(row.modifiedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.modifiedAt)}</time>{/if}
+            {#if row.ingestRoot && row.ingestedAt}<time class="file-date ingest-time" datetime={row.ingestedAt} title={`Ingested ${new Date(row.ingestedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.ingestedAt)}</time>{/if}
             <svelte:component this={fileIcon(row.file)} size={14} /><span>{row.name}</span>{#if row.file.space === 'ingest'}<i class:integrated={row.file.integration_status === 'integrated'} class="integration-dot" title={row.file.integration_status}></i>{/if}
           </button>
         {/if}
