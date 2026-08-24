@@ -1,17 +1,84 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
   <title id="title">Locus</title>
-  <rect width="512" height="512" fill="#f6f5f1"/>
-  <rect x="56" y="56" width="400" height="400" rx="112" fill="#292823"/>
-  <g
-    fill="none"
-    stroke="#e27052"
-    stroke-linecap="round"
+  <desc id="description">An open knowledge book inside a blue location marker</desc>
+  <defs>
+    <linearGradient id="marker" x1="112" y1="72" x2="394" y2="444" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6bc7ed"/>
+      <stop offset="0.48" stop-color="#3daee9"/>
+      <stop offset="1" stop-color="#1678b8"/>
+    </linearGradient>
+    <linearGradient id="left-page" x1="128" y1="158" x2="246" y2="326" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dcecf3"/>
+    </linearGradient>
+    <linearGradient id="right-page" x1="386" y1="158" x2="266" y2="326" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef6f9"/>
+    </linearGradient>
+    <linearGradient id="bookmark" x1="322" y1="177" x2="322" y2="283" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffb24a"/>
+      <stop offset="1" stop-color="#f67400"/>
+    </linearGradient>
+  </defs>
+
+  <!-- A soft silhouette gives the icon Breeze-like depth without an opaque tile. -->
+  <path
+    d="M256 34C147 34 68 113 68 216c0 116 116 208 177 263a16 16 0 0 0 22 0c61-55 177-147 177-263C444 113 365 34 256 34Z"
+    fill="#000000"
+    opacity="0.18"
+    transform="translate(0 9)"
+  />
+  <path
+    d="M256 28C147 28 68 107 68 210c0 116 116 208 177 263a16 16 0 0 0 22 0c61-55 177-147 177-263C444 107 365 28 256 28Z"
+    fill="url(#marker)"
+    stroke="#176991"
+    stroke-width="8"
     stroke-linejoin="round"
-    stroke-width="2"
-    transform="translate(104 104) scale(12.667)"
-  >
-    <path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/>
-    <path d="M20 2v4M22 4h-4"/>
-    <circle cx="4" cy="20" r="2"/>
-  </g>
+  />
+  <path
+    d="M256 48C164 48 91 116 91 207"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="11"
+    stroke-linecap="round"
+    opacity="0.34"
+  />
+
+  <!-- Open book: the central fold forms a subtle Locus axis. -->
+  <path
+    d="M119 168c47-14 91-6 129 22v150c-38-28-82-36-129-22Z"
+    fill="#165d82"
+    opacity="0.28"
+    transform="translate(0 8)"
+  />
+  <path
+    d="M393 168c-47-14-91-6-129 22v150c38-28 82-36 129-22Z"
+    fill="#165d82"
+    opacity="0.28"
+    transform="translate(0 8)"
+  />
+  <path
+    d="M119 160c47-14 91-6 129 22v150c-38-28-82-36-129-22Z"
+    fill="url(#left-page)"
+    stroke="#176991"
+    stroke-width="7"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M393 160c-47-14-91-6-129 22v150c38-28 82-36 129-22Z"
+    fill="url(#right-page)"
+    stroke="#176991"
+    stroke-width="7"
+    stroke-linejoin="round"
+  />
+  <path d="M256 184v150" fill="none" stroke="#176991" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- A compact knowledge graph keeps the mark readable at small icon sizes. -->
+  <path d="m154 255 36-31 29 48" fill="none" stroke="#65a9c7" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="154" cy="255" r="11" fill="#3daee9" stroke="#176991" stroke-width="5"/>
+  <circle cx="190" cy="224" r="11" fill="#3daee9" stroke="#176991" stroke-width="5"/>
+  <circle cx="219" cy="272" r="11" fill="#3daee9" stroke="#176991" stroke-width="5"/>
+
+  <path d="M303 178h38v107l-19-18-19 18Z" fill="url(#bookmark)" stroke="#c95d00" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M287 304c25-10 50-13 75-8" fill="none" stroke="#8db9cc" stroke-width="8" stroke-linecap="round"/>
 </svg>

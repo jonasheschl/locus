@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+
+set -eu
+
+launcher_path=$0
+while [ -L "$launcher_path" ]; do
+  launcher_dir=$(CDPATH= cd -- "$(dirname -- "$launcher_path")" && pwd)
+  launcher_path=$(readlink -- "$launcher_path")
+  case "$launcher_path" in
+    /*) ;;
+    *) launcher_path=$launcher_dir/$launcher_path ;;
+  esac
+done
+
+app_dir=$(CDPATH= cd -- "$(dirname -- "$launcher_path")" && pwd)
+runtime=$app_dir/locus
+
+activate_running_locus() {
+  command -v qdbus6 >/dev/null 2>&1 || return 1
+
+  tray_items=$(qdbus6 \
+    org.kde.StatusNotifierWatcher \
+    /StatusNotifierWatcher \
+    org.kde.StatusNotifierWatcher.RegisteredStatusNotifierItems 2>/dev/null) || return 1
+
+  while IFS= read -r tray_item; do
+    [ -n "$tray_item" ] || continue
+
+    tray_service=${tray_item%%/*}
+    tray_path=/${tray_item#*/}
+    tray_title=$(qdbus6 \
+      "$tray_service" \
+      "$tray_path" \
+      org.freedesktop.DBus.Properties.Get \
+      org.kde.StatusNotifierItem \
+      Title 2>/dev/null) || continue
+    [ "$tray_title" = "locus" ] || [ "$tray_title" = "Locus" ] || continue
+
+    menu_path=$tray_path/Menu
+
+    for menu_id in 1 2 3 4 5 6; do
+      menu_label=$(qdbus6 \
+        "$tray_service" \
+        "$menu_path" \
+        com.canonical.dbusmenu.GetProperty \
+        "$menu_id" \
+        label 2>/dev/null) || continue
+      [ "$menu_label" = "Open Locus" ] || continue
+
+      qdbus6 \
+        "$tray_service" \
+        "$menu_path" \
+        com.canonical.dbusmenu.Event \
+        "$menu_id" \
+        clicked \
+        '' \
+        0 >/dev/null 2>&1
+      return 0
+    done
+  done <<EOF
+$tray_items
+EOF
+
+  return 1
+}
+
+if pgrep -u "$(id -u)" -x locus >/dev/null 2>&1; then
+  if activate_running_locus; then
+    exit 0
+  fi
+
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send \
+      --app-name=Locus \
+      --icon=locus \
+      "Locus is already running" \
+      "Open it from the system tray."
+  fi
+  exit 0
+fi
+
+exec "$runtime" "$@"

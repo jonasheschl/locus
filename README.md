@@ -57,6 +57,12 @@ restricted to tray creation, window show/hide/focus, application exit, and writi
 app's own `resources.neu` update bundle. General filesystem reads/writes, shell, environment,
 clipboard, storage, extensions, and other system APIs are not exposed.
 
+On Linux, desktop launchers and command aliases should invoke the included `locus-launcher` beside
+the `locus` runtime. If Locus is already minimized to KDE's tray, this launcher selects **Open
+Locus** through the standard StatusNotifier interface instead of starting a second application
+server on the same port. Other desktops receive a notification directing them to the existing tray
+instance when KDE's interface is unavailable.
+
 The desktop app checks the latest GitHub Release when it starts. If that release has a newer
 version, it downloads and installs `resources.neu`, then offers to quit so the update is loaded on
 the next launch. Publish a release by pushing a semantic-version tag:

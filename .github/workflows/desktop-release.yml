@@ -37,6 +37,12 @@ jobs:
       - name: Build desktop package
         run: npm run desktop:build
 
+      - name: Add Linux single-instance launcher
+        run: |
+          install -m 755 desktop/linux/locus-launcher desktop-dist/locus/locus-launcher
+          cd desktop-dist/locus
+          zip -u ../locus-release.zip locus-launcher
+
       - name: Create update manifest
         run: node scripts/desktop-release.mjs manifest "$GITHUB_REF_NAME"
 
