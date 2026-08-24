@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from agents import Agent, ModelSettings, RunConfig, Runner, function_tool
 from agents.models.openai_responses import OpenAIResponsesModel
@@ -47,7 +47,8 @@ files live below /workspace; read-only snapshots of the knowledge spaces are ava
 website's clearly relevant same-site pages, run Docling, and keep task notes or intermediate
 artifacts when this is more effective than short database reads. Put completed external source
 files below /workspace/outbox/ingest using a hidden temporary file followed by a rename. Locus then
-imports them into immutable Ingest and reports their final paths. Read the reported Ingest paths
+imports them into the same immutable Ingest folder as the attached source and reports their final
+paths. Do not create a separate global agent or enrichment folder. Read the reported Ingest paths
 with read_path before citing or integrating them. Never try to alter /knowledge, never place Wiki
 pages in the outbox, and continue using write_wiki_page for every durable Wiki edit.
 
@@ -57,6 +58,16 @@ integrate, file, update, repair, or otherwise persist a change. Use lint_wiki wh
 health matters. For Wiki writes, classify the operation as ingest when compiling knowledge from
 sources and maintain when repairing existing Wiki structure. Manual edits are exceptional: use
 update_manual_note only when the user explicitly names the Manual note and asks to change it.
+
+Treat source review as a conversation, not a preamble to automatic integration. For a newly
+attached or unprocessed Ingest source, first explain its central contribution, important claims,
+evidence and limitations, tensions with the existing Wiki, and the pages it could affect. Then ask
+the owner what to emphasize, challenge, retain, omit, or reinterpret. Continue this discussion for
+as many turns as useful and carry the owner's decisions forward. Adding, attaching, reviewing, or
+asking to "process" a source does not by itself authorize Wiki writes. Integrate only after the
+owner explicitly moves the conversation into integration, unless they explicitly ask to skip the
+discussion. When integrating after a discussion, follow the agreed editorial direction rather
+than mechanically copying every source claim.
 
 The owner has explicitly authorized the application's scheduled Manual-integration request. When
 that request is identified as automatic Manual integration, treat it as authorization to update
@@ -187,10 +198,19 @@ class WikiAgent:
 
     def messages(self, thread_id: str) -> list[dict[str, Any]]:
         self._require_thread(thread_id)
-        return self.database.fetch_all(
-            "SELECT id, role, content, created_at FROM chat_messages WHERE thread_id = ? ORDER BY id",
+        rows = self.database.fetch_all(
+            """
+            SELECT id, role, content, context_paths_json, created_at
+            FROM chat_messages WHERE thread_id = ? ORDER BY id
+            """,
             (thread_id,),
         )
+        for row in rows:
+            try:
+                row["context_paths"] = json.loads(row.pop("context_paths_json"))
+            except (json.JSONDecodeError, TypeError):
+                row["context_paths"] = []
+        return rows
 
     def delete_thread(self, thread_id: str) -> None:
         with self.database.write() as connection:
@@ -202,10 +222,11 @@ class WikiAgent:
         thread_id: str | None,
         current_note: str | None = None,
         context_paths: list[str] | None = None,
+        write_mode: Literal["auto", "review", "integrate"] = "auto",
     ) -> AsyncIterator[dict[str, Any]]:
         async with self._run_lock:
             async for event in self._stream_answer(
-                question, thread_id, current_note, context_paths
+                question, thread_id, current_note, context_paths, write_mode
             ):
                 yield event
 
@@ -215,6 +236,7 @@ class WikiAgent:
         thread_id: str | None,
         current_note: str | None = None,
         context_paths: list[str] | None = None,
+        write_mode: Literal["auto", "review", "integrate"] = "auto",
     ) -> AsyncIterator[dict[str, Any]]:
         question = question.strip()
         if not question:
@@ -232,25 +254,35 @@ class WikiAgent:
         source_paths = set(selected_paths)
         try:
             credential = await self.auth.valid_credential()
-            self._append_message(thread_id, "user", question)
+            self._append_message(thread_id, "user", question, selected_paths)
             agent, client = self._build_agent(
                 credential,
                 thread_id=thread_id,
                 operation_state=operation_state,
                 source_paths=source_paths,
                 operation_title=self._thread_title(question),
+                write_mode=write_mode,
             )
             history = self.database.fetch_all(
                 """
-                SELECT role, content FROM chat_messages
+                SELECT role, content, context_paths_json FROM chat_messages
                 WHERE thread_id = ? ORDER BY id DESC LIMIT 18
                 """,
                 (thread_id,),
             )
             history.reverse()
-            model_input: list[dict[str, Any]] = [
-                {"role": item["role"], "content": item["content"]} for item in history
-            ]
+            model_input: list[dict[str, Any]] = []
+            for item in history:
+                content = item["content"]
+                try:
+                    message_paths = json.loads(item["context_paths_json"])
+                except (json.JSONDecodeError, TypeError):
+                    message_paths = []
+                if item["role"] == "user" and message_paths:
+                    content += "\n\nAttached paths for this message: " + ", ".join(
+                        f"[[{path}]]" for path in message_paths
+                    )
+                model_input.append({"role": item["role"], "content": content})
             wiki_index = self.database.fetch_one(
                 "SELECT content FROM notes WHERE path='wiki/index.md'"
             ) or {"content": "# Wiki Index\n\n_No compiled pages yet._"}
@@ -498,9 +530,15 @@ summary.
         operation_state: dict[str, str | None] | None = None,
         source_paths: set[str] | None = None,
         operation_title: str = "Wiki update",
+        write_mode: Literal["auto", "review", "integrate"] = "auto",
     ) -> tuple[Agent[Any], AsyncOpenAI]:
         state = operation_state if operation_state is not None else {"id": None}
         observed_sources = source_paths if source_paths is not None else set()
+        attached_ingest_paths = {
+            path
+            for path in observed_sources
+            if path.casefold().startswith("ingest/")
+        }
         write_lock = threading.RLock()
 
         def ensure_operation(kind: str) -> str:
@@ -587,6 +625,12 @@ summary.
                 commands[:8],
                 min(max(timeout_seconds, 1), 300) * 1_000,
                 min(max(max_output_characters, 1_000), 100_000),
+                attached_ingest_paths
+                or {
+                    path
+                    for path in observed_sources
+                    if path.casefold().startswith("ingest/")
+                },
             )
             return json.dumps(payload, ensure_ascii=False)
 
@@ -617,16 +661,37 @@ summary.
             search_sources,
             read_path,
             lint_wiki,
-            write_wiki_page,
-            update_manual_note,
         ]
         if self.workspace_shell is not None:
             tools.insert(3, work_in_workspace)
+        if write_mode != "review":
+            tools.extend([write_wiki_page, update_manual_note])
 
         schema_path = self.contract_path or self.indexer.workspace / "AGENTS.md"
         schema = schema_path.read_text(encoding="utf-8", errors="replace") if schema_path.exists() else ""
+        turn_guidance = {
+            "review": (
+                "Turn policy: this is a source-discussion turn. Wiki and Manual write tools are "
+                "intentionally unavailable. Read the attached source and relevant Wiki pages, "
+                "help the owner decide what to focus on, challenge, keep, leave out, or change, "
+                "and end with concrete questions or editorial choices when useful. Do not imply "
+                "that integration has already happened."
+            ),
+            "integrate": (
+                "Turn policy: the owner has explicitly moved the source conversation into "
+                "integration. Apply the editorial direction established in the conversation, "
+                "inspect every existing target before writing, and make the complete durable "
+                "Wiki update with provenance and cross-links."
+            ),
+        }.get(write_mode, "")
         instructions = "\n\n".join(
-            [SYSTEM_INSTRUCTIONS, "Workspace contract:\n" + schema[:20_000]]
+            part
+            for part in [
+                SYSTEM_INSTRUCTIONS,
+                "Workspace contract:\n" + schema[:20_000],
+                turn_guidance,
+            ]
+            if part
         )
         selected_model, reasoning_effort, fast_mode = self.preferences()
         default_headers = {
@@ -674,12 +739,28 @@ summary.
         value = str(raw_type or "tool")
         return value.removesuffix("_call")
 
-    def _append_message(self, thread_id: str, role: str, content: str) -> None:
+    def _append_message(
+        self,
+        thread_id: str,
+        role: str,
+        content: str,
+        context_paths: list[str] | None = None,
+    ) -> None:
         now = utc_now()
         with self.database.write() as connection:
             connection.execute(
-                "INSERT INTO chat_messages(thread_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (thread_id, role, content, now),
+                """
+                INSERT INTO chat_messages(
+                    thread_id, role, content, context_paths_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    role,
+                    content,
+                    json.dumps(list(dict.fromkeys(context_paths or []))),
+                    now,
+                ),
             )
             connection.execute(
                 "UPDATE chat_threads SET updated_at = ? WHERE id = ?", (now, thread_id)

@@ -138,6 +138,21 @@ async def test_agent_constructs_codex_responses_model(tmp_path: Path) -> None:
     finally:
         await client.close()
 
+    review_agent, review_client = service._build_agent(
+        {"access_token": "test-token", "account_id": "test-account"},
+        write_mode="review",
+    )
+    try:
+        assert {tool.name for tool in review_agent.tools} == {
+            "search_wiki",
+            "search_sources",
+            "read_path",
+            "lint_wiki",
+        }
+        assert "source-discussion turn" in review_agent.instructions
+    finally:
+        await review_client.close()
+
     with database.write() as connection:
         connection.executemany(
             "INSERT INTO runtime_settings(key, value, updated_at) VALUES (?, ?, 'now')",
@@ -159,6 +174,35 @@ async def test_agent_constructs_codex_responses_model(tmp_path: Path) -> None:
         )
     finally:
         await configured_client.close()
+
+
+def test_chat_messages_preserve_attached_source_context(tmp_path: Path) -> None:
+    database = Database(tmp_path / "wiki.sqlite3")
+    database.initialize()
+    ensure_wiki_contract(tmp_path)
+    note_indexer = NoteIndexer(tmp_path, database)
+    note_indexer.scan()
+    service = WikiAgent(
+        database,
+        note_indexer,
+        IngestIndexer(tmp_path, database),
+        OperationManager(tmp_path, database, note_indexer),
+        CodexAuth(database),
+        "gpt-test",
+    )
+    thread = service.create_thread("Discuss a source")
+
+    service._append_message(
+        thread["id"],
+        "user",
+        "What should we keep?",
+        ["ingest/paper.pdf"],
+    )
+    service._append_message(thread["id"], "assistant", "Let's examine the claims.")
+
+    messages = service.messages(thread["id"])
+    assert messages[0]["context_paths"] == ["ingest/paper.pdf"]
+    assert messages[1]["context_paths"] == []
 
 
 @pytest.mark.asyncio

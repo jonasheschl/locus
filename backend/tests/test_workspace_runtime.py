@@ -1,6 +1,4 @@
-import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -30,6 +28,10 @@ def test_workspace_runtime_executes_in_its_persistent_root(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_shell_imports_completed_outbox_files_into_ingest(tmp_path: Path) -> None:
     knowledge = tmp_path / "knowledge"
+    source_folder = knowledge / "ingest" / "situational-awareness"
+    source_folder.mkdir(parents=True)
+    primary = source_folder / "introduction.html"
+    primary.write_text("<html><body>Introduction.</body></html>", encoding="utf-8")
     agent_workspace = tmp_path / "agent"
     outbox = agent_workspace / "outbox" / "ingest" / "series"
     outbox.mkdir(parents=True)
@@ -40,6 +42,7 @@ async def test_shell_imports_completed_outbox_files_into_ingest(tmp_path: Path) 
     database = Database(tmp_path / "wiki.sqlite3")
     database.initialize()
     ingest_indexer = IngestIndexer(knowledge, database)
+    ingest_indexer.scan()
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/execute"
@@ -69,23 +72,18 @@ async def test_shell_imports_completed_outbox_files_into_ingest(tmp_path: Path) 
             ingest_indexer,
             client=client,
         )
-        result = await shell.execute(
-            SimpleNamespace(
-                data=SimpleNamespace(
-                    action={
-                        "commands": ["true"],
-                        "timeout_ms": 5_000,
-                        "max_output_length": 20_000,
-                    }
-                )
-            )
+        result = await shell.run(
+            ["true"],
+            5_000,
+            20_000,
+            {"ingest/situational-awareness/introduction.html"},
         )
 
-    target = knowledge / "ingest" / "agent" / "series" / "chapter.html"
+    target = knowledge / "ingest" / "situational-awareness" / "chapter.html"
     assert target.is_file()
     assert not (outbox / "chapter.html").exists()
-    assert "ingest/agent/series/chapter.html" in result.output[0].stdout
+    assert "ingest/situational-awareness/chapter.html" in result["outputs"][0]["stdout"]
     assert database.fetch_one(
         "SELECT content FROM ingest_items WHERE path = ?",
-        ("ingest/agent/series/chapter.html",),
+        ("ingest/situational-awareness/chapter.html",),
     )["content"].endswith("Full chapter text.")

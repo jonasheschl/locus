@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,7 @@ MAX_DOWNLOAD_BYTES = 50_000_000
 HTML_EXTRACTOR_VERSION = "docling-html-2.118.0"
 PDF_EXTRACTOR_VERSION = "pypdf-6.15.0"
 PLAIN_EXTRACTOR_VERSION = "plain-v1"
+INGEST_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def extractor_version(path: Path) -> str:
@@ -93,6 +96,135 @@ class IngestIndexer:
         self.root = workspace / "ingest"
         self.database = database
 
+    def create_group(self, label: str, parent: Path | None = None) -> dict[str, str]:
+        """Create one durable folder representing one ingestion event."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        parent = (parent or self.root).resolve()
+        try:
+            parent.relative_to(self.root.resolve())
+        except ValueError as error:
+            raise ValueError("Ingest groups must stay inside ingest/") from error
+        slug = INGEST_SLUG_RE.sub("-", label.casefold()).strip("-")[:80] or "source"
+        folder = parent / slug
+        for number in range(2, 10_000):
+            if not folder.exists():
+                break
+            folder = parent / f"{slug}-{number}"
+        else:
+            raise RuntimeError("Could not allocate a unique Ingest folder")
+        folder.mkdir(parents=True)
+        folder_path = folder.relative_to(self.workspace).as_posix()
+        created_at = utc_now()
+        with self.database.write() as connection:
+            connection.execute(
+                """
+                INSERT INTO ingest_groups(folder_path, created_at, primary_path)
+                VALUES (?, ?, NULL)
+                """,
+                (folder_path, created_at),
+            )
+        return {"folder_path": folder_path, "created_at": created_at}
+
+    def register_group(
+        self,
+        folder_path: str,
+        primary_path: str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        folder = (self.workspace / folder_path).resolve()
+        try:
+            folder.relative_to(self.root.resolve())
+        except ValueError as error:
+            raise ValueError("Ingest groups must stay inside ingest/") from error
+        with self.database.write() as connection:
+            connection.execute(
+                """
+                INSERT INTO ingest_groups(folder_path, created_at, primary_path)
+                VALUES (?, ?, ?)
+                ON CONFLICT(folder_path) DO UPDATE SET
+                    primary_path=COALESCE(ingest_groups.primary_path, excluded.primary_path)
+                """,
+                (folder_path, created_at or utc_now(), primary_path),
+            )
+
+    def groups(self) -> list[dict[str, Any]]:
+        return self.database.fetch_all(
+            """
+            SELECT folder_path, created_at, primary_path
+            FROM ingest_groups ORDER BY created_at DESC
+            """
+        )
+
+    def group_for_path(self, path: str) -> dict[str, Any] | None:
+        candidates = [
+            group
+            for group in self.groups()
+            if path == group["folder_path"]
+            or path.startswith(f'{group["folder_path"]}/')
+        ]
+        return max(candidates, key=lambda group: len(group["folder_path"]), default=None)
+
+    def group_paths_for(self, paths: set[str] | list[str]) -> set[str]:
+        return {
+            group["folder_path"]
+            for path in paths
+            if (group := self.group_for_path(path)) is not None
+        }
+
+    def metadata_for_path(
+        self,
+        path: str,
+        mtime_ns: int | None = None,
+        indexed_at: str | None = None,
+    ) -> dict[str, Any]:
+        group = self.group_for_path(path)
+        if group:
+            return {
+                "ingest_group": group["folder_path"],
+                "ingested_at": group["created_at"],
+                "is_ingest_group": path == group["folder_path"],
+            }
+        if mtime_ns:
+            ingested_at = datetime.fromtimestamp(mtime_ns / 1_000_000_000, UTC).isoformat()
+        else:
+            ingested_at = indexed_at
+        return {
+            "ingest_group": path,
+            "ingested_at": ingested_at,
+            "is_ingest_group": True,
+        }
+
+    def decorate_files(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                **item,
+                **(
+                    self.metadata_for_path(
+                        item["path"], item.get("mtime_ns"), item.get("indexed_at")
+                    )
+                    if item.get("space") == "ingest"
+                    else {}
+                ),
+            }
+            for item in files
+        ]
+
+    def decorate_directories(
+        self, directories: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                **item,
+                **(
+                    self.metadata_for_path(item["path"])
+                    if item.get("space") == "ingest"
+                    and self.group_for_path(item["path"])
+                    else {}
+                ),
+            }
+            for item in directories
+        ]
+
     def discover(self) -> list[Path]:
         self.root.mkdir(parents=True, exist_ok=True)
         return sorted(
@@ -109,6 +241,7 @@ class IngestIndexer:
 
     def scan(self) -> dict[str, int]:
         files = self.discover()
+        self._sync_groups()
         relative_paths = {path.relative_to(self.workspace).as_posix() for path in files}
         existing = {
             row["path"]: (row["mtime_ns"], row["size"], row["extractor_version"])
@@ -190,6 +323,57 @@ class IngestIndexer:
                 connection.execute("DELETE FROM ingest_fts WHERE path = ?", (relative,))
                 connection.execute("DELETE FROM ingest_items WHERE path = ?", (relative,))
         return {"indexed": changed, "removed": len(removed), "total": len(files)}
+
+    def _sync_groups(self) -> None:
+        """Discover portable top-level ingest folders and discard stale group records."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        source_files = [
+            path
+            for path in self.root.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and path.suffix.casefold() in SUPPORTED_INGEST_EXTENSIONS | {".md"}
+            and not any(part.startswith(".") for part in path.relative_to(self.root).parts)
+        ]
+        groups = self.groups()
+        live_groups = {
+            group["folder_path"]
+            for group in groups
+            if (self.workspace / group["folder_path"]).is_dir()
+        }
+        with self.database.write() as connection:
+            for group in groups:
+                if group["folder_path"] not in live_groups:
+                    connection.execute(
+                        "DELETE FROM ingest_groups WHERE folder_path = ?",
+                        (group["folder_path"],),
+                    )
+
+        top_level_names = {
+            path.relative_to(self.root).parts[0]
+            for path in source_files
+            if len(path.relative_to(self.root).parts) > 1
+        }
+        for name in sorted(top_level_names):
+            folder = self.root / name
+            folder_path = folder.relative_to(self.workspace).as_posix()
+            if folder_path in live_groups or any(
+                existing.startswith(f"{folder_path}/") for existing in live_groups
+            ):
+                continue
+            members = [path for path in source_files if path.is_relative_to(folder)]
+            if not members:
+                continue
+            primary = min(members, key=lambda path: (path.stat().st_mtime_ns, path.as_posix()))
+            created_at = datetime.fromtimestamp(
+                primary.stat().st_mtime_ns / 1_000_000_000, UTC
+            ).isoformat()
+            self.register_group(
+                folder_path,
+                primary.relative_to(self.workspace).as_posix(),
+                created_at,
+            )
+            live_groups.add(folder_path)
 
     def search(self, query: str, limit: int = 12) -> list[dict[str, Any]]:
         query = query.strip()

@@ -6,15 +6,20 @@
     Bot,
     Check,
     ChevronRight,
+    Code2,
     FileInput,
     FilePlus2,
     KeyRound,
     Link2,
+    ListFilter,
     LoaderCircle,
+    MessageCircleQuestion,
     MessageSquarePlus,
     Paperclip,
     Plus,
     RotateCcw,
+    Scale,
+    ShieldCheck,
     Trash2,
     UserRound,
     X
@@ -49,8 +54,18 @@
   let threadContextMenu = null;
   let threadError = '';
   let followOutput = true;
+  let pendingWriteMode = 'auto';
+  let expandedDiff = '';
+  let diffLoading = '';
+  let operationDiffs = {};
+  let diffErrors = {};
 
   $: unprocessed = files.filter((file) => file.space === 'ingest' && file.integration_status !== 'integrated').slice(0, 8);
+  $: attachedIngest = contextPaths
+    .map((path) => files.find((file) => file.path === path))
+    .filter((file) => file?.space === 'ingest');
+  $: reviewSources = attachedIngest.filter((file) => file.integration_status !== 'integrated');
+  $: sourceStage = pendingWriteMode === 'integrate' ? 'integrate' : reviewSources.length ? 'review' : 'auto';
   $: if (initialPrompt && initialPrompt !== lastPrompt) {
     lastPrompt = initialPrompt;
     input = initialPrompt;
@@ -78,7 +93,12 @@
       }))
     ].sort((left, right) => new Date(left.created_at) - new Date(right.created_at));
     input = '';
-    contextPaths = [];
+    const lastUserMessage = [...result.messages].reverse().find((message) => message.role === 'user');
+    contextPaths = [...(lastUserMessage?.context_paths || [])];
+    pendingWriteMode = contextPaths.some((path) => {
+      const file = files.find((candidate) => candidate.path === path);
+      return file?.space === 'ingest' && file.integration_status !== 'integrated';
+    }) ? 'review' : 'auto';
   }
 
   function newChat() {
@@ -89,6 +109,7 @@
     input = '';
     contextPaths = [];
     statusMessage = '';
+    pendingWriteMode = 'auto';
   }
 
   function showThreadContextMenu(event, thread) {
@@ -115,10 +136,13 @@
     }
   }
 
-  async function ask(prompt = input) {
+  async function ask(prompt = input, writeMode = '') {
     const question = prompt.trim();
     if (!question || streaming) return;
     if (!authStatus.authenticated) { onLogin(); return; }
+    const effectiveWriteMode = writeMode
+      || (pendingWriteMode === 'integrate' ? 'integrate' : '')
+      || (reviewSources.length ? 'review' : 'auto');
     input = '';
     followOutput = true;
     messages = [...messages, { role: 'user', content: question }, { role: 'assistant', content: '', activities: [] }];
@@ -127,7 +151,12 @@
     try {
       const response = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, thread_id: threadId, context_paths: contextPaths })
+        body: JSON.stringify({
+          question,
+          thread_id: threadId,
+          context_paths: contextPaths,
+          write_mode: effectiveWriteMode
+        })
       });
       if (!response.ok || !response.body) throw new Error('Could not start the Codex request.');
       const reader = response.body.getReader();
@@ -148,6 +177,7 @@
     } finally {
       streaming = false;
       statusMessage = '';
+      if (effectiveWriteMode === 'integrate' && pendingWriteMode === 'integrate') pendingWriteMode = 'review';
       loadThreads();
       await onFilesChanged();
     }
@@ -162,7 +192,10 @@
       threadId = event.thread_id;
       if (!messages[messages.length - 1]?.content) updateAssistant(event.content);
     }
-    if (event.type === 'operation') messages = [...messages, { role: 'operation', operation: event.operation }];
+    if (event.type === 'operation') {
+      pendingWriteMode = 'auto';
+      messages = [...messages, { role: 'operation', operation: event.operation }];
+    }
     if (event.type === 'error') {
       failRunningActivities();
       updateAssistant(`I couldn't complete that request: ${event.message}`);
@@ -211,6 +244,20 @@
     addMenuOpen = false;
   }
 
+  function detach(path) {
+    contextPaths = contextPaths.filter((item) => item !== path);
+    if (!contextPaths.some((item) => {
+      const file = files.find((candidate) => candidate.path === item);
+      return file?.space === 'ingest' && file.integration_status !== 'integrated';
+    })) pendingWriteMode = 'auto';
+  }
+
+  function beginSourceReview(path) {
+    attach(path);
+    pendingWriteMode = 'review';
+    input = `Start a review of [[${path}]]. Explain its key contribution, evidence, limitations, and tensions with the existing Wiki. Then ask me what to emphasize, challenge, keep, leave out, or change. Do not integrate it yet.`;
+  }
+
   async function uploadFiles(selected) {
     uploadError = '';
     try {
@@ -220,7 +267,8 @@
         const created = await api('/api/ingest/upload', { method: 'POST', body });
         attach(created.path);
       }
-      input = 'Review the attached source. Summarize its key contribution and tell me which Wiki pages it should affect.';
+      pendingWriteMode = 'review';
+      input = 'Start a review of the attached source. Explain its key contribution, evidence, limitations, tensions with the existing Wiki, and likely page impact. Then ask me what to emphasize, challenge, keep, leave out, or change. Do not integrate it yet.';
       await onFilesChanged();
     } catch (cause) { uploadError = cause.message; }
     finally { if (fileInput) fileInput.value = ''; }
@@ -234,14 +282,51 @@
       const created = await api('/api/ingest/url', { method: 'POST', body: JSON.stringify({ url: url.trim() }) });
       url = '';
       attach(created.path);
-      input = 'Review the downloaded website and tell me what context is still needed before integration.';
+      pendingWriteMode = 'review';
+      input = 'Start a review of the downloaded website. Explain its contribution, evidence, limitations, and tensions with the existing Wiki. Ask what I want to emphasize, challenge, keep, leave out, or change. Do not integrate it yet.';
       await onFilesChanged();
     } catch (cause) { uploadError = cause.message; }
     finally { addingUrl = false; }
   }
 
   function fileAnswer() {
+    pendingWriteMode = 'integrate';
     input = 'File the durable knowledge from the answer above into the Wiki. Update the relevant pages, cross-links, and provenance.';
+  }
+
+  function continueSourceDiscussion(kind) {
+    pendingWriteMode = 'review';
+    input = kind === 'challenge'
+      ? 'Challenge the source more aggressively. Which claims are weak, overstated, contradicted, or too context-dependent to preserve in the Wiki?'
+      : 'Help me shape the editorial focus. Separate what is durable and worth keeping from what is incidental, redundant, or better left out.';
+  }
+
+  function prepareIntegration() {
+    pendingWriteMode = 'integrate';
+    input = 'Integrate the source now using the direction we agreed on in this conversation. Preserve the important challenges and omissions we discussed, update every relevant durable Wiki page, and record provenance. Give me a concise change summary; I will open the raw diff only if I need it.';
+  }
+
+  function keepDiscussing() {
+    pendingWriteMode = 'review';
+  }
+
+  async function toggleDiff(operation) {
+    if (expandedDiff === operation.id) {
+      expandedDiff = '';
+      return;
+    }
+    expandedDiff = operation.id;
+    if (operationDiffs[operation.id]) return;
+    diffLoading = operation.id;
+    diffErrors = { ...diffErrors, [operation.id]: '' };
+    try {
+      const result = await api(`/api/operations/${operation.id}/diff`);
+      operationDiffs = { ...operationDiffs, [operation.id]: result };
+    } catch (cause) {
+      diffErrors = { ...diffErrors, [operation.id]: cause.message };
+    } finally {
+      diffLoading = '';
+    }
   }
 
   async function undo(operation) {
@@ -291,7 +376,7 @@
             <button class="connect-callout" onclick={onLogin}><KeyRound size={18} /><span><strong>Connect Codex to begin</strong><small>Authorize with your ChatGPT account</small></span></button>
           {:else}
             <div class="work-starters three-starters"><button onclick={() => ask('What does the Wiki currently know, and where are its biggest gaps?')}><BookOpenText size={17} /><span><strong>Orient me</strong><small>Read the compiled Wiki first</small></span></button><button onclick={() => fileInput.click()}><FilePlus2 size={17} /><span><strong>Add a source</strong><small>Review it before integrating</small></span></button><button onclick={() => ask('Check the Wiki for broken links, orphans, missing provenance, index gaps, and unprocessed sources. Explain what matters most.')}><FileInput size={17} /><span><strong>Check Wiki health</strong><small>Inspect structure and sources</small></span></button></div>
-            {#if unprocessed.length}<div class="source-queue">{#each unprocessed.slice(0,4) as source}<button onclick={() => { attach(source.path); input = `Review [[${source.path}]] and tell me what it contributes. Do not integrate it until I ask.`; }}><span class="status-dot"></span><span><strong>{source.title}</strong><small>{source.path}</small></span><ChevronRight size={14} /></button>{/each}</div>{/if}
+            {#if unprocessed.length}<div class="source-queue">{#each unprocessed.slice(0,4) as source}<button onclick={() => beginSourceReview(source.path)}><span class="status-dot"></span><span><strong>{source.title}</strong><small>{source.path}</small></span><ChevronRight size={14} /></button>{/each}</div>{/if}
           {/if}
         </div>
       {:else}
@@ -302,12 +387,27 @@
                 <header><span class:undone={message.operation.status === 'undone'}><Check size={15} /></span><div><strong>Wiki update</strong><small>{message.operation.status} · {message.operation.kind}</small></div></header>
                 {#if message.operation.sources?.length}<div class="receipt-row"><span>Sources</span><div>{#each message.operation.sources as source}<button onclick={() => onOpenSource(files.find((file) => file.path === source.path) || { path: source.path, kind: 'markdown' })}>{source.path}</button>{/each}</div></div>{/if}
                 <div class="receipt-row"><span>Changes</span><div>{#each message.operation.changes || [] as change}<button onclick={() => onOpenSource({ path: change.path, kind: 'markdown', space: 'wiki' })}><b>{change.action}</b>{change.path}</button>{/each}{#if !message.operation.changes?.length}<em>No Wiki files changed.</em>{/if}</div></div>
-                {#if message.operation.status === 'completed' && message.operation.changes?.length}<button class="undo-button" disabled={undoing === message.operation.id} onclick={() => undo(message.operation)}><RotateCcw size={13} /> {undoing === message.operation.id ? 'Undoing…' : 'Undo operation'}</button>{/if}
+                {#if message.operation.changes?.length}
+                  <div class="receipt-actions">
+                    <button class="diff-button" disabled={diffLoading === message.operation.id} onclick={() => toggleDiff(message.operation)}><Code2 size={13} /> {diffLoading === message.operation.id ? 'Loading diff…' : expandedDiff === message.operation.id ? 'Hide raw diff' : 'View raw diff'}</button>
+                    {#if message.operation.status === 'completed'}<button class="undo-button" disabled={undoing === message.operation.id} onclick={() => undo(message.operation)}><RotateCcw size={13} /> {undoing === message.operation.id ? 'Undoing…' : 'Undo operation'}</button>{/if}
+                  </div>
+                {/if}
+                {#if expandedDiff === message.operation.id}
+                  <div class="operation-diff">
+                    {#if diffErrors[message.operation.id]}<p>{diffErrors[message.operation.id]}</p>
+                    {:else if operationDiffs[message.operation.id]}
+                      {#each operationDiffs[message.operation.id].changes as change}
+                        <section><strong>{change.path}</strong><pre>{change.diff || 'No textual change.'}</pre></section>
+                      {/each}
+                    {/if}
+                  </div>
+                {/if}
               </article>
             {:else}
               <article class:assistant={message.role === 'assistant'} class="chat-message">
                 <span class="message-avatar">{#if message.role === 'assistant'}<Bot size={16} />{:else}<UserRound size={16} />{/if}</span>
-                <div><span class="message-role">{message.role === 'assistant' ? 'Locus' : 'You'}</span>{#if message.role === 'assistant'}{#if message.activities?.length}<AgentActivity activities={message.activities} streaming={streaming && index === messages.length - 1} />{/if}<Markdown content={message.content || ' '} compact />{#if !streaming && index === messages.length - 1}<button class="file-answer" onclick={fileAnswer}><BookOpenText size={13} /> File durable knowledge to Wiki</button>{/if}{:else}<p>{message.content}</p>{/if}</div>
+                <div><span class="message-role">{message.role === 'assistant' ? 'Locus' : 'You'}</span>{#if message.role === 'assistant'}{#if message.activities?.length}<AgentActivity activities={message.activities} streaming={streaming && index === messages.length - 1} />{/if}<Markdown content={message.content || ' '} compact />{#if !streaming && index === messages.length - 1}{#if reviewSources.length}<div class="source-review-actions"><button onclick={() => continueSourceDiscussion('challenge')}><Scale size={13} /> Challenge claims</button><button onclick={() => continueSourceDiscussion('focus')}><ListFilter size={13} /> Shape the focus</button><button class="integrate-action" onclick={prepareIntegration}><ShieldCheck size={13} /> Prepare integration</button></div>{:else}<button class="file-answer" onclick={fileAnswer}><BookOpenText size={13} /> File durable knowledge to Wiki</button>{/if}{/if}{:else}<p>{message.content}</p>{/if}</div>
               </article>
             {/if}
           {/each}
@@ -317,13 +417,20 @@
     </div>
 
     <div class="composer-wrap">
-      {#if contextPaths.length}<div class="context-chips">{#each contextPaths as path}<span><Paperclip size={11} />{path}<button onclick={() => contextPaths = contextPaths.filter((item) => item !== path)}><X size={11} /></button></span>{/each}</div>{/if}
+      {#if sourceStage !== 'auto'}
+        <div class:integration={sourceStage === 'integrate'} class="source-stage">
+          {#if sourceStage === 'integrate'}<ShieldCheck size={16} />{:else}<MessageCircleQuestion size={16} />{/if}
+          <span><strong>{sourceStage === 'integrate' ? 'Integration request' : 'Source discussion'}</strong><small>{sourceStage === 'integrate' ? 'The next turn may update the Wiki using the agreed direction.' : 'Review turns can read and challenge sources, but cannot write to the Wiki.'}</small></span>
+          {#if sourceStage === 'integrate'}<button onclick={keepDiscussing}>Keep discussing</button>{:else}<button onclick={prepareIntegration}>Ready to integrate</button>{/if}
+        </div>
+      {/if}
+      {#if contextPaths.length}<div class="context-chips">{#each contextPaths as path}<span><Paperclip size={11} />{path}<button onclick={() => detach(path)}><X size={11} /></button></span>{/each}</div>{/if}
       {#if addMenuOpen}
         <div class="add-source-menu">
           <header><strong>Add context or source</strong><button onclick={() => addMenuOpen = false}><X size={14} /></button></header>
           <button onclick={() => fileInput.click()}><FilePlus2 size={16} /><span><strong>Upload source</strong><small>Stored immutably under ingest/</small></span></button>
           <form onsubmit={(event) => { event.preventDefault(); addUrl(); }}><label><Link2 size={14} /> Download website</label><div><input bind:value={url} type="url" placeholder="https://…" /><button disabled={!url.trim() || addingUrl}>{addingUrl ? 'Downloading…' : 'Download'}</button></div></form>
-          {#if unprocessed.length}<span class="menu-label">Unprocessed</span>{#each unprocessed as source}<button onclick={() => attach(source.path)}><span class="status-dot"></span><span><strong>{source.title}</strong><small>{source.path}</small></span></button>{/each}{/if}
+          {#if unprocessed.length}<span class="menu-label">Unprocessed</span>{#each unprocessed as source}<button onclick={() => beginSourceReview(source.path)}><span class="status-dot"></span><span><strong>{source.title}</strong><small>{source.path}</small></span></button>{/each}{/if}
           {#if uploadError}<p class="upload-error">{uploadError}</p>{/if}
         </div>
       {/if}

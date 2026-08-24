@@ -5,6 +5,7 @@ import os
 import tempfile
 import uuid
 from datetime import UTC, datetime
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +256,44 @@ class OperationManager:
             (operation_id,),
         )
         return {**operation, "changes": changes, "sources": sources}
+
+    def diff(self, operation_id: str) -> dict[str, Any]:
+        operation = self.database.fetch_one(
+            "SELECT id, title, status FROM wiki_operations WHERE id = ?", (operation_id,)
+        )
+        if not operation:
+            raise KeyError("Operation not found")
+        changes = self.database.fetch_all(
+            """
+            SELECT path, action, before_content, after_content
+            FROM wiki_operation_changes
+            WHERE operation_id = ? ORDER BY path
+            """,
+            (operation_id,),
+        )
+        rendered = []
+        for change in changes:
+            before = change["before_content"] or ""
+            after = change["after_content"]
+            rendered.append(
+                {
+                    "path": change["path"],
+                    "action": change["action"],
+                    "diff": "".join(
+                        unified_diff(
+                            before.splitlines(keepends=True),
+                            after.splitlines(keepends=True),
+                            fromfile=(
+                                "/dev/null"
+                                if change["before_content"] is None
+                                else f"a/{change['path']}"
+                            ),
+                            tofile=f"b/{change['path']}",
+                        )
+                    ),
+                }
+            )
+        return {**operation, "changes": rendered}
 
     def for_thread(self, thread_id: str) -> list[dict[str, Any]]:
         rows = self.database.fetch_all(

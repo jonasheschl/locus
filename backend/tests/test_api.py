@@ -25,6 +25,34 @@ def app_for(tmp_path: Path):
     )
 
 
+def test_frontend_serves_pwa_files_and_keeps_spa_fallback(tmp_path: Path) -> None:
+    app = app_for(tmp_path)
+    frontend = tmp_path / ".frontend"
+    (frontend / "index.html").write_text("<h1>Locus shell</h1>", encoding="utf-8")
+    (frontend / "manifest.webmanifest").write_text(
+        '{"name":"Locus"}', encoding="utf-8"
+    )
+    (frontend / "service-worker.js").write_text(
+        "self.addEventListener('fetch', () => {});", encoding="utf-8"
+    )
+
+    with TestClient(app) as client:
+        manifest = client.get("/manifest.webmanifest")
+        assert manifest.status_code == 200
+        assert manifest.headers["content-type"].startswith("application/manifest+json")
+        assert manifest.headers["cache-control"] == "no-cache"
+        assert manifest.json()["name"] == "Locus"
+
+        worker = client.get("/service-worker.js")
+        assert worker.status_code == 200
+        assert worker.headers["cache-control"] == "no-cache"
+        assert worker.headers["service-worker-allowed"] == "/"
+
+        fallback = client.get("/some/client/route")
+        assert fallback.status_code == 200
+        assert "Locus shell" in fallback.text
+
+
 def test_health_notes_search_and_graph(tmp_path: Path) -> None:
     with TestClient(app_for(tmp_path)) as client:
         assert client.get("/api/health").json()["notes"] == 3
@@ -112,29 +140,46 @@ def test_ingest_upload_url_and_space_file_view(tmp_path: Path, monkeypatch) -> N
         assert uploaded.status_code == 201
         assert uploaded.json()["space"] == "ingest"
         assert uploaded.json()["kind"] == "asset"
+        assert uploaded.json()["path"] == "ingest/research/research.txt"
+        assert uploaded.json()["ingest_group"] == "ingest/research"
+        assert uploaded.json()["ingested_at"]
 
         downloaded = client.post(
             "/api/ingest/url",
             json={"url": "https://example.com/report", "title": "Example report"},
         )
         assert downloaded.status_code == 201
-        assert downloaded.json()["path"] == "ingest/web/example-report.html"
-        assert (tmp_path / "ingest" / "web" / "example-report.html").read_bytes().startswith(
+        assert downloaded.json()["path"] == "ingest/example-report/example-report.html"
+        assert (tmp_path / "ingest" / "example-report" / "example-report.html").read_bytes().startswith(
             b"<html>"
         )
         item = client.get(
-            "/api/ingest/items/ingest%2Fweb%2Fexample-report.html"
+            "/api/ingest/items/ingest%2Fexample-report%2Fexample-report.html"
         ).json()
         assert item["source_url"] == "https://example.com/report"
         assert "Archived web knowledge" in item["content"]
 
         files = client.get("/api/files").json()["files"]
         assert {item["space"] for item in files} == {"manual", "ingest", "wiki"}
-        assert next(item for item in files if item["path"] == "ingest/research.txt")[
+        assert next(item for item in files if item["path"] == "ingest/research/research.txt")[
             "integration_status"
         ] == "unprocessed"
+        ingest_directories = [
+            item
+            for item in client.get("/api/files").json()["directories"]
+            if item["space"] == "ingest"
+        ]
+        assert {item["path"] for item in ingest_directories} >= {
+            "ingest/research",
+            "ingest/example-report",
+        }
+        assert all(
+            item["ingested_at"]
+            for item in ingest_directories
+            if item["path"] in {"ingest/research", "ingest/example-report"}
+        )
         assert client.get("/api/search", params={"q": "external research"}).json()["results"][0]["space"] == "ingest"
-        assert client.get("/api/search", params={"q": "archived web knowledge"}).json()["results"][0]["path"] == "ingest/web/example-report.html"
+        assert client.get("/api/search", params={"q": "archived web knowledge"}).json()["results"][0]["path"] == "ingest/example-report/example-report.html"
 
         chat = client.post(
             "/api/chat",
@@ -161,14 +206,16 @@ def test_ingest_upload_url_and_space_file_view(tmp_path: Path, monkeypatch) -> N
                 "type": "activity",
                 "activity": {
                     "id": "download:1",
-                    "label": "Downloaded ingest/web/example-report-2.html",
+                    "label": "Downloaded ingest/example-report-2/example-report.html",
                     "detail": "https://example.com/automatic-source",
                     "kind": "download_url",
                     "status": "completed",
                 },
             },
         ]
-        assert (tmp_path / "ingest" / "web" / "example-report-2.html").is_file()
+        assert (
+            tmp_path / "ingest" / "example-report-2" / "example-report.html"
+        ).is_file()
 
 
 def test_ingest_markdown_is_immutable_through_notes_api(tmp_path: Path) -> None:
@@ -179,10 +226,56 @@ def test_ingest_markdown_is_immutable_through_notes_api(tmp_path: Path) -> None:
         )
         assert uploaded.status_code == 201
         response = client.put(
-            "/api/notes/ingest%2Fsource.md", json={"content": "# Rewritten\n"}
+            f"/api/notes/{uploaded.json()['path'].replace('/', '%2F')}",
+            json={"content": "# Rewritten\n"},
         )
         assert response.status_code == 403
-        assert (tmp_path / "ingest" / "source.md").read_text() == "# Untouched source\n"
+        assert (tmp_path / uploaded.json()["path"]).read_text() == "# Untouched source\n"
+
+
+def test_unprocessed_ingest_context_requires_review_transition(
+    tmp_path: Path, monkeypatch
+) -> None:
+    observed_modes = []
+
+    async def fake_stream_answer(
+        _self,
+        question,
+        thread_id,
+        current_note=None,
+        context_paths=None,
+        write_mode="auto",
+    ):
+        observed_modes.append(write_mode)
+        yield {"type": "done", "thread_id": thread_id or "test", "content": question}
+
+    monkeypatch.setattr("app.main.WikiAgent.stream_answer", fake_stream_answer)
+    with TestClient(app_for(tmp_path)) as client:
+        uploaded = client.post(
+            "/api/ingest/upload",
+            files={"file": ("paper.txt", b"A claim to discuss.", "text/plain")},
+        ).json()
+
+        reviewed = client.post(
+            "/api/chat",
+            json={
+                "question": "Process this source",
+                "context_paths": [uploaded["path"]],
+                "write_mode": "auto",
+            },
+        )
+        integrated = client.post(
+            "/api/chat",
+            json={
+                "question": "Integrate our agreed direction",
+                "context_paths": [uploaded["path"]],
+                "write_mode": "integrate",
+            },
+        )
+
+    assert reviewed.status_code == 200
+    assert integrated.status_code == 200
+    assert observed_modes == ["review", "integrate"]
 
 
 def test_file_tree_directory_rename_and_delete_actions(tmp_path: Path) -> None:

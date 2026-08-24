@@ -55,6 +55,7 @@ class ChatRequest(BaseModel):
     thread_id: str | None = None
     current_note: str | None = None
     context_paths: list[str] = Field(default_factory=list, max_length=20)
+    write_mode: Literal["auto", "review", "integrate"] = "auto"
 
 
 class URLIngest(BaseModel):
@@ -169,14 +170,14 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
             (normalized_url,),
         )
         if existing and (app_settings.workspace / existing["path"]).is_file():
-            return file_payload(database, existing["path"])
+            return file_payload(database, existing["path"], ingest_indexer)
 
         downloaded = await download_web_source(normalized_url)
         title = (requested_title or downloaded.title).strip()[:300] or "Web source"
         slug = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")[:80] or "web-source"
-        target_dir = app_settings.workspace / "ingest" / "web"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = available_path(target_dir / f"{slug}{downloaded.extension}")
+        group = ingest_indexer.create_group(title)
+        target_dir = app_settings.workspace / group["folder_path"]
+        target = target_dir / f"{slug}{downloaded.extension}"
         atomic_write_bytes(target, downloaded.content)
         ingest_indexer.scan()
         relative = target.relative_to(app_settings.workspace).as_posix()
@@ -195,7 +196,8 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
                 "INSERT INTO ingest_fts(path, title, content) VALUES (?, ?, ?)",
                 (relative, title, item["content"]),
             )
-        return file_payload(database, relative)
+        ingest_indexer.register_group(group["folder_path"], relative)
+        return file_payload(database, relative, ingest_indexer)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -245,7 +247,14 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "public, max-age=300"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        elif request.url.path in {"/service-worker.js", "/manifest.webmanifest"}:
+            response.headers["Cache-Control"] = "no-cache"
+            if request.url.path == "/service-worker.js":
+                response.headers["Service-Worker-Allowed"] = "/"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=300"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
             "script-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'"
@@ -384,9 +393,13 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
             }
             for row in assets
         )
+        files = ingest_indexer.decorate_files(files)
+        directories = ingest_indexer.decorate_directories(
+            knowledge_directories(app_settings.workspace)
+        )
         return {
             "files": files,
-            "directories": knowledge_directories(app_settings.workspace),
+            "directories": directories,
             "spaces": ["manual", "ingest", "wiki"],
         }
 
@@ -489,18 +502,20 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
                 status_code=400,
                 detail="Supported ingest files are PDF, Markdown, text, HTML, CSV, and JSON",
             )
-        target_dir = resolve_ingest_directory(app_settings.workspace, folder)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = available_path(target_dir / filename)
         content = await file.read(50_000_001)
         await file.close()
         if len(content) > 50_000_000:
             raise HTTPException(status_code=413, detail="Ingest files are limited to 50 MB")
+        parent = resolve_ingest_directory(app_settings.workspace, folder)
+        parent.mkdir(parents=True, exist_ok=True)
+        group = ingest_indexer.create_group(Path(filename).stem, parent)
+        target = app_settings.workspace / group["folder_path"] / filename
         atomic_write_bytes(target, content)
         indexer.scan()
         ingest_indexer.scan()
         relative = target.relative_to(app_settings.workspace).as_posix()
-        return file_payload(database, relative)
+        ingest_indexer.register_group(group["folder_path"], relative)
+        return file_payload(database, relative, ingest_indexer)
 
     @app.post("/api/manual/spreadsheet", status_code=201)
     async def upload_manual_spreadsheet(
@@ -528,7 +543,7 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
         indexer.scan()
         relative = target.relative_to(app_settings.workspace).as_posix()
-        return file_payload(database, relative)
+        return file_payload(database, relative, ingest_indexer)
 
     @app.post("/api/ingest/url", status_code=201)
     async def ingest_url(body: URLIngest) -> dict[str, Any]:
@@ -547,6 +562,9 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
             **item,
             "space": "ingest",
             "kind": "asset",
+            **ingest_indexer.metadata_for_path(
+                normalized, item.get("mtime_ns"), item.get("indexed_at")
+            ),
             **source_integration_payload(database, normalized),
         }
 
@@ -569,12 +587,16 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(path, body.content)
         indexer.scan()
-        return note_payload(database, path.relative_to(app_settings.workspace).as_posix())
+        return note_payload(
+            database,
+            path.relative_to(app_settings.workspace).as_posix(),
+            ingest_indexer,
+        )
 
     @app.get("/api/notes/{note_path:path}")
     async def get_note(note_path: str) -> dict[str, Any]:
         normalized = normalize_note_path(app_settings.workspace, note_path)
-        return note_payload(database, normalized)
+        return note_payload(database, normalized, ingest_indexer)
 
     @app.get("/api/spreadsheets/{item_path:path}")
     async def get_spreadsheet(item_path: str) -> dict[str, Any]:
@@ -609,7 +631,11 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
             raise HTTPException(status_code=403, detail="Ingest sources are immutable")
         atomic_write(path, body.content)
         indexer.scan()
-        return note_payload(database, path.relative_to(app_settings.workspace).as_posix())
+        return note_payload(
+            database,
+            path.relative_to(app_settings.workspace).as_posix(),
+            ingest_indexer,
+        )
 
     @app.get("/api/graph")
     async def graph() -> dict[str, Any]:
@@ -716,6 +742,13 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
+    @app.get("/api/operations/{operation_id}/diff")
+    async def get_operation_diff(operation_id: str) -> dict[str, Any]:
+        try:
+            return operations.diff(operation_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     @app.post("/api/operations/{operation_id}/undo")
     async def undo_operation(operation_id: str) -> dict[str, Any]:
         try:
@@ -779,11 +812,24 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
                     ) + "\n"
                     if source["path"] not in context_paths:
                         context_paths.append(source["path"])
+                write_mode = body.write_mode
+                if write_mode == "auto":
+                    for path in context_paths:
+                        if not path.casefold().startswith("ingest/"):
+                            continue
+                        integrated = database.fetch_one(
+                            "SELECT 1 AS found FROM source_integrations WHERE source_path = ?",
+                            (path,),
+                        )
+                        if not integrated:
+                            write_mode = "review"
+                            break
                 async for event in agent.stream_answer(
                     body.question,
                     body.thread_id,
                     body.current_note,
                     context_paths,
+                    write_mode,
                 ):
                     yield json.dumps(event, ensure_ascii=False) + "\n"
             except (AuthError, KeyError, ValueError, WebIngestError) as error:
@@ -811,7 +857,17 @@ def create_app(app_settings: Settings = default_settings) -> FastAPI:
     async def frontend(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="API route not found")
-        index_file = app_settings.frontend_dist / "index.html"
+        frontend_root = app_settings.frontend_dist.resolve()
+        requested_file = (frontend_root / unquote(full_path)).resolve()
+        if requested_file.is_relative_to(frontend_root) and requested_file.is_file():
+            media_type = (
+                "application/manifest+json"
+                if requested_file.suffix == ".webmanifest"
+                else None
+            )
+            return FileResponse(requested_file, media_type=media_type)
+
+        index_file = frontend_root / "index.html"
         if index_file.exists():
             return FileResponse(index_file)
         return JSONResponse(
@@ -925,9 +981,16 @@ def available_path(path: Path) -> Path:
     raise HTTPException(status_code=409, detail="Could not allocate a unique ingest filename")
 
 
-def file_payload(database: Database, path: str) -> dict[str, Any]:
+def file_payload(
+    database: Database,
+    path: str,
+    ingest_indexer: IngestIndexer | None = None,
+) -> dict[str, Any]:
     note = database.fetch_one(
-        "SELECT path, space, title, size, word_count, indexed_at FROM notes WHERE path = ?",
+        """
+        SELECT path, space, title, size, word_count, mtime_ns, indexed_at
+        FROM notes WHERE path = ?
+        """,
         (path,),
     )
     if note:
@@ -941,17 +1004,23 @@ def file_payload(database: Database, path: str) -> dict[str, Any]:
             "extension": extension,
         }
         if note["space"] == "ingest":
+            if ingest_indexer:
+                payload.update(
+                    ingest_indexer.metadata_for_path(
+                        path, note.get("mtime_ns"), note.get("indexed_at")
+                    )
+                )
             payload.update(source_integration_payload(database, path))
         return payload
     item = database.fetch_one(
         """
-        SELECT path, title, source_type, media_type, size, word_count, indexed_at,
+        SELECT path, title, source_type, media_type, size, word_count, mtime_ns, indexed_at,
                source_url, extraction_error FROM ingest_items WHERE path = ?
         """,
         (path,),
     )
     if item:
-        return {
+        payload = {
             **item,
             "space": "ingest",
             "kind": "asset",
@@ -959,10 +1028,21 @@ def file_payload(database: Database, path: str) -> dict[str, Any]:
             "extension": Path(path).suffix.casefold(),
             **source_integration_payload(database, path),
         }
+        if ingest_indexer:
+            payload.update(
+                ingest_indexer.metadata_for_path(
+                    path, item.get("mtime_ns"), item.get("indexed_at")
+                )
+            )
+        return payload
     raise HTTPException(status_code=500, detail="The new ingest item could not be indexed")
 
 
-def note_payload(database: Database, path: str) -> dict[str, Any]:
+def note_payload(
+    database: Database,
+    path: str,
+    ingest_indexer: IngestIndexer | None = None,
+) -> dict[str, Any]:
     note = database.fetch_one("SELECT * FROM notes WHERE path = ?", (path,))
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -1001,6 +1081,12 @@ def note_payload(database: Database, path: str) -> dict[str, Any]:
             (path,),
         )
     elif decoded["space"] == "ingest":
+        if ingest_indexer:
+            decoded.update(
+                ingest_indexer.metadata_for_path(
+                    path, decoded.get("mtime_ns"), decoded.get("indexed_at")
+                )
+            )
         decoded.update(source_integration_payload(database, path))
     return decoded
 

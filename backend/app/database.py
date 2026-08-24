@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
     content TEXT NOT NULL,
+    context_paths_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES chat_threads(id) ON DELETE CASCADE
 );
@@ -95,6 +96,12 @@ CREATE TABLE IF NOT EXISTS ingest_items (
     size INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
     indexed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ingest_groups (
+    folder_path TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    primary_path TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS ingest_fts USING fts5(
@@ -171,6 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_links_target ON links(normalized_target);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, id);
 CREATE INDEX IF NOT EXISTS idx_wiki_operations_thread ON wiki_operations(thread_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_wiki_changes_path ON wiki_operation_changes(path);
+CREATE INDEX IF NOT EXISTS idx_ingest_groups_created ON ingest_groups(created_at);
 """
 
 
@@ -197,6 +205,15 @@ class Database:
             if "extractor_version" not in ingest_columns:
                 connection.execute(
                     "ALTER TABLE ingest_items ADD COLUMN extractor_version TEXT NOT NULL DEFAULT ''"
+                )
+            message_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(chat_messages)").fetchall()
+            }
+            if "context_paths_json" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE chat_messages ADD COLUMN context_paths_json "
+                    "TEXT NOT NULL DEFAULT '[]'"
                 )
             connection.execute(
                 """

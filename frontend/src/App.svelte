@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Command, FilePlus2, LoaderCircle, Menu, Search, X } from '@lucide/svelte';
+  import { Command, Download, FilePlus2, LoaderCircle, Menu, Search, X } from '@lucide/svelte';
   import AuthModal from './AuthModal.svelte';
   import ChatPage from './ChatPage.svelte';
   import NotesWorkspace from './NotesWorkspace.svelte';
@@ -26,10 +26,21 @@
   let newError = '';
   let chatPrompt = '';
   let chatContext = [];
+  let installPrompt = null;
+  let installed = false;
 
   onMount(() => {
     refreshAll();
+    installed = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
     const onHash = () => { route = parseRoute(); mobileSidebar = false; searchOpen = false; };
+    const onInstallAvailable = (event) => {
+      event.preventDefault();
+      installPrompt = event;
+    };
+    const onAppInstalled = () => {
+      installed = true;
+      installPrompt = null;
+    };
     const onKey = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault(); searchOpen = true;
@@ -38,11 +49,22 @@
     };
     window.addEventListener('hashchange', onHash);
     window.addEventListener('keydown', onKey);
+    window.addEventListener('beforeinstallprompt', onInstallAvailable);
+    window.addEventListener('appinstalled', onAppInstalled);
     return () => {
       window.removeEventListener('hashchange', onHash);
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('beforeinstallprompt', onInstallAvailable);
+      window.removeEventListener('appinstalled', onAppInstalled);
     };
   });
+
+  async function installApp() {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+  }
 
   async function refreshAll() {
     try {
@@ -152,7 +174,11 @@
     <header class="topbar">
       <div class="topbar-left"><button class="icon-button mobile-menu" onclick={() => mobileSidebar = true}><Menu size={18} /></button><span class="page-location">{route.view === 'chat' ? 'Chat' : 'Notes'}</span></div>
       <button class="search-trigger" onclick={() => searchOpen = true}><Search size={16} /><span>Search Manual, Ingest, and Wiki</span><kbd><Command size={11} /> K</kbd></button>
-      <div class="topbar-actions"></div>
+      <div class="topbar-actions">
+        {#if installPrompt && !installed}
+          <button class="topbar-new" onclick={installApp} title="Install Locus on this computer"><Download size={14} /> Install app</button>
+        {/if}
+      </div>
     </header>
 
     <main class="main-content">

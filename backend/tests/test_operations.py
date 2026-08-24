@@ -47,6 +47,17 @@ def test_ingest_operation_tracks_sources_rebuilds_index_and_undoes(tmp_path: Pat
         ("ingest/paper.md",),
     ) == {"operation_id": operation_id}
 
+    raw_diff = operations.diff(operation_id)
+    concept_diff = next(
+        change
+        for change in raw_diff["changes"]
+        if change["path"] == "wiki/concepts/trust.md"
+    )
+    assert concept_diff["action"] == "created"
+    assert "--- /dev/null" in concept_diff["diff"]
+    assert "+# Agent trust" in concept_diff["diff"]
+    assert any(change["path"] == "wiki/index.md" for change in raw_diff["changes"])
+
     undone = operations.undo(operation_id)
 
     assert undone["status"] == "undone"
@@ -61,6 +72,23 @@ def test_ingest_operation_tracks_sources_rebuilds_index_and_undoes(tmp_path: Pat
     assert "undo | Integrate paper" in (
         tmp_path / "wiki" / "log.md"
     ).read_text(encoding="utf-8")
+
+
+def test_operation_diff_reports_updated_content(tmp_path: Path) -> None:
+    page = tmp_path / "wiki" / "topic.md"
+    page.parent.mkdir()
+    page.write_text("# Topic\n\nOld framing.\n", encoding="utf-8")
+    _, indexer, operations = operation_manager(tmp_path)
+    indexer.scan()
+    operation_id = operations.start("maintain", "Reframe topic", None)
+    operations.write_wiki(operation_id, "topic.md", "# Topic\n\nNew framing.\n")
+
+    change = operations.diff(operation_id)["changes"][0]
+
+    assert change["action"] == "updated"
+    assert "--- a/wiki/topic.md" in change["diff"]
+    assert "-Old framing." in change["diff"]
+    assert "+New framing." in change["diff"]
 
 
 def test_undo_refuses_to_overwrite_newer_changes(tmp_path: Path) -> None:

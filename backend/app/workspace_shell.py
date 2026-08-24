@@ -74,6 +74,7 @@ class WorkspaceShell:
         commands: list[str],
         timeout_ms: int = 120_000,
         max_output_length: int = 100_000,
+        ingest_context_paths: set[str] | None = None,
     ) -> dict[str, Any]:
         timeout_ms = min(max(int(timeout_ms), 1_000), 300_000)
         max_output_length = min(max(int(max_output_length), 1_000), 100_000)
@@ -102,7 +103,9 @@ class WorkspaceShell:
                 "max_output_length": max_output_length,
             }
 
-        imported, import_errors = await asyncio.to_thread(self._import_outbox)
+        imported, import_errors = await asyncio.to_thread(
+            self._import_outbox, ingest_context_paths or set()
+        )
         outputs = payload.get("outputs")
         if not isinstance(outputs, list) or not outputs:
             outputs = [
@@ -138,13 +141,14 @@ class WorkspaceShell:
         payload["max_output_length"] = max_output_length
         return payload
 
-    def _import_outbox(self) -> tuple[list[tuple[str, str]], list[str]]:
+    def _import_outbox(
+        self, ingest_context_paths: set[str] | None = None
+    ) -> tuple[list[tuple[str, str]], list[str]]:
         outbox = (self.agent_workspace / "outbox" / "ingest").resolve()
         outbox.mkdir(parents=True, exist_ok=True)
-        ingest_root = (self.knowledge_workspace / "ingest" / "agent").resolve()
-        ingest_root.mkdir(parents=True, exist_ok=True)
         imported: list[tuple[str, str]] = []
         errors: list[str] = []
+        candidates: list[tuple[Path, str]] = []
         for source in sorted(outbox.rglob("*")):
             if not source.is_file() or source.is_symlink():
                 continue
@@ -158,8 +162,26 @@ class WorkspaceShell:
             if source.stat().st_size > MAX_IMPORTED_FILE_BYTES:
                 errors.append(f"{shell_path}: files are limited to 50 MB")
                 continue
-            target = self._available_path(ingest_root / relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            candidates.append((source, shell_path))
+
+        if not candidates:
+            return imported, errors
+
+        group_paths = self.ingest_indexer.group_paths_for(ingest_context_paths or set())
+        if len(group_paths) == 1:
+            group_path = next(iter(group_paths))
+        else:
+            first_relative = candidates[0][0].relative_to(outbox)
+            label = (
+                first_relative.parts[0]
+                if len(first_relative.parts) > 1
+                else first_relative.stem
+            )
+            group_path = self.ingest_indexer.create_group(label)["folder_path"]
+        ingest_root = (self.knowledge_workspace / group_path).resolve()
+
+        for source, shell_path in candidates:
+            target = self._available_path(ingest_root / source.name)
             os.replace(source, target)
             imported.append(
                 (
@@ -169,6 +191,7 @@ class WorkspaceShell:
             )
         if imported:
             self.ingest_indexer.scan()
+            self.ingest_indexer.register_group(group_path, imported[0][1])
         return imported, errors
 
     @staticmethod

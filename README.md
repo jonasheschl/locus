@@ -25,6 +25,13 @@ Open [http://localhost:7331](http://localhost:7331). The Docker port is explicit
 `127.0.0.1`, so the application is not reachable through the machine's LAN address. FastAPI serves
 the compiled Svelte application as one origin; there is no separately exposed development server.
 
+In Chrome or Edge, use the **Install app** button in the top bar (or the browser's install icon) to
+add Locus to the desktop and launch it in its own window. The app shell and loaded static assets are
+available offline; notes, search, and chat still require the local Locus server to be running.
+Locus supplies desktop-sized and maskable versions of its own icon. If the app was installed before
+those assets were available, uninstall and reinstall it once so Chromium refreshes the operating
+system launcher files.
+
 To stop it:
 
 ```bash
@@ -60,13 +67,24 @@ and retry on a later interval.
 
 PDF and text-like content is extracted locally for search and agent reading. Downloaded HTML is
 converted to structured Markdown locally with Docling, while the immutable original HTML remains
-under `ingest/web/`. URLs added through the source menu—or included directly in a chat message—are
-downloaded as their original HTML, PDF, text, CSV, or JSON representation. Redirects are checked,
-downloads are limited to 50 MB, and local/private-network targets are rejected. Reusing the same
-URL attaches the already stored source rather than creating another copy.
+in Ingest. Each ingestion event receives its own folder. URLs added through the source menu—or
+included directly in a chat message—are downloaded as their original HTML, PDF, text, CSV, or JSON
+representation. If the agent downloads related pages for situational awareness, those enrichment
+files are routed into the original source's folder instead of a global agent-download directory.
+The Notes browser timestamps these ingest folders and orders them newest first. Redirects are
+checked, downloads are limited to 50 MB, and local/private-network targets are rejected. Reusing
+the same URL attaches the already stored source rather than creating another copy.
 
 Ingest is immutable through the note editor and through the agent. To replace a source, change the
 raw file outside Locus or add a newer source.
+
+Adding or attaching an unprocessed source opens a **Source discussion** stage. Those turns can read
+the source and relevant Wiki pages but have no Wiki or Manual write tools. Use the conversation to
+decide what to emphasize, challenge, retain, omit, or reinterpret; Locus preserves the attachment
+when the thread is reopened. Choose **Ready to integrate** only when that direction is settled. The
+next turn can then update every relevant Wiki page, after which the normal receipt shows a concise
+change list and undo. **View raw diff** remains available on the receipt when exact edits matter,
+but reviewing diffs is not required for the normal workflow.
 
 ### Wiki
 
@@ -97,9 +115,9 @@ while Wiki changes continue through the normal audited write operation. Agent ru
 
 Reading, questioning, and source review do not create write operations. A tracked operation begins
 lazily only when the agent actually invokes a write tool. It returns a receipt containing sources
-and every created or updated path. **Undo operation** restores the exact pre-operation contents,
-but refuses to overwrite a newer human or agent edit. Manual edits remain exceptional and require
-a request that explicitly names the note.
+and every created or updated path. Raw unified diffs are loaded only when requested. **Undo
+operation** restores the exact pre-operation contents, but refuses to overwrite a newer human or
+agent edit. Manual edits remain exceptional and require a request that explicitly names the note.
 
 ## Index and storage
 

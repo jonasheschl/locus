@@ -1,6 +1,7 @@
 <script>
   import {
     BookOpenText,
+    CalendarClock,
     Check,
     ChevronDown,
     ChevronRight,
@@ -94,9 +95,20 @@
     if (normalizedQuery) {
       return sourceFiles
         .filter((file) => `${file.title} ${file.path}`.toLowerCase().includes(normalizedQuery))
-        .map((file) => ({ type: 'file', file, depth: 0, name: file.title }));
+        .map((file) => ({
+          type: 'file', file, depth: 0, name: file.title,
+          ingestRoot: file.space === 'ingest', ingestedAt: file.ingested_at
+        }))
+        .sort((a, b) => {
+          if (a.file.space === 'ingest' && b.file.space === 'ingest') {
+            const chronology = Date.parse(b.ingestedAt || 0) - Date.parse(a.ingestedAt || 0);
+            if (chronology) return chronology;
+          }
+          return a.name.localeCompare(b.name);
+        });
     }
     const rows = [];
+    const directoryByPath = new Map(sourceDirectories.map((directory) => [directory.path, directory]));
     for (const space of ['manual', 'ingest', 'wiki']) {
       const group = sourceFiles.filter((file) => file.space === space);
       const rootKey = `${space}:`;
@@ -130,13 +142,35 @@
         }
       }
       const visit = (parent, depth) => {
-        for (const directory of Array.from(directories.get(parent) || []).sort()) {
-          const key = `${space}:${directory}`;
-          rows.push({ type: 'folder', space, key, name: directory.split('/').at(-1), depth, path: `${space}/${directory}` });
-          if (openFolders.has(key)) visit(directory, depth + 1);
-        }
-        for (const file of (filesAt.get(parent) || []).sort((a, b) => a.name.localeCompare(b.name))) {
-          rows.push({ type: 'file', file: file.file, name: file.name, depth });
+        const childDirectories = Array.from(directories.get(parent) || []).map((directory) => {
+          const path = `${space}/${directory}`;
+          const metadata = directoryByPath.get(path) || {};
+          return {
+            type: 'folder', space, key: `${space}:${directory}`,
+            name: directory.split('/').at(-1), depth, path,
+            ingestRoot: space === 'ingest' && parent === '' && metadata.is_ingest_group,
+            ingestedAt: metadata.ingested_at
+          };
+        });
+        const childFiles = (filesAt.get(parent) || []).map((entry) => ({
+          type: 'file', file: entry.file, name: entry.name, depth,
+          ingestRoot: space === 'ingest' && parent === '',
+          ingestedAt: entry.file.ingested_at
+        }));
+        const children = [...childDirectories, ...childFiles].sort((a, b) => {
+          if (space === 'ingest' && parent === '') {
+            const chronology = Date.parse(b.ingestedAt || 0) - Date.parse(a.ingestedAt || 0);
+            if (chronology) return chronology;
+          }
+          if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        for (const child of children) {
+          rows.push(child);
+          if (child.type === 'folder' && openFolders.has(child.key)) {
+            const directory = child.path.slice(space.length + 1);
+            visit(directory, depth + 1);
+          }
         }
       };
       visit('', 1);
@@ -155,6 +189,15 @@
     if (file.kind === 'spreadsheet') return FileSpreadsheet;
     if (['.html', '.htm', '.json'].includes(file.extension)) return FileCode2;
     return File;
+  }
+
+  function formatIngestedAt(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat(undefined, {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+    }).format(date);
   }
 
   async function save() {
@@ -317,11 +360,13 @@
             <span class={`space-icon ${row.space}`}><svelte:component this={spaceMeta[row.space].icon} size={13} /></span><strong>{spaceMeta[row.space].label}</strong><small>{row.count}</small>
           </button>
         {:else if row.type === 'folder'}
-          <button class="tree-folder" style={`padding-left:${14 + row.depth * 13}px`} onclick={() => toggle(row.key)} oncontextmenu={(event) => showContextMenu(event, row)}>
+          <button class:ingest-root={row.ingestRoot} class="tree-folder" style={`padding-left:${14 + row.depth * 13}px`} onclick={() => toggle(row.key)} oncontextmenu={(event) => showContextMenu(event, row)}>
+            {#if row.ingestRoot && row.ingestedAt}<time class="ingest-time" datetime={row.ingestedAt} title={`Ingested ${new Date(row.ingestedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.ingestedAt)}</time>{/if}
             {#if expanded.has(row.key)}<ChevronDown size={13} /><FolderOpen size={14} />{:else}<ChevronRight size={13} /><Folder size={14} />{/if}<span>{row.name}</span>
           </button>
         {:else}
-          <button class:active={selectedPath === row.file.path} class="tree-file" style={`padding-left:${23 + row.depth * 13}px`} onclick={() => openFile(row.file)} oncontextmenu={(event) => showContextMenu(event, row)} title={row.file.path}>
+          <button class:active={selectedPath === row.file.path} class:ingest-root={row.ingestRoot} class="tree-file" style={`padding-left:${23 + row.depth * 13}px`} onclick={() => openFile(row.file)} oncontextmenu={(event) => showContextMenu(event, row)} title={row.file.path}>
+            {#if row.ingestRoot && row.ingestedAt}<time class="ingest-time" datetime={row.ingestedAt} title={`Ingested ${new Date(row.ingestedAt).toLocaleString()}`}><CalendarClock size={10} /> {formatIngestedAt(row.ingestedAt)}</time>{/if}
             <svelte:component this={fileIcon(row.file)} size={14} /><span>{row.name}</span>{#if row.file.space === 'ingest'}<i class:integrated={row.file.integration_status === 'integrated'} class="integration-dot" title={row.file.integration_status}></i>{/if}
           </button>
         {/if}
@@ -390,7 +435,7 @@
       {#if item.backlinks}
         <div class="inspector-block"><span class="section-label"><Link2 size={12} /> BACKLINKS</span>{#each item.backlinks as link}<button onclick={() => onOpen({ path: link.path, kind: 'markdown', space: 'manual' })}>{link.title}</button>{/each}{#if !item.backlinks.length}<p>No backlinks yet.</p>{/if}</div>
       {/if}
-      <div class="inspector-block"><span class="section-label">DETAILS</span><dl><dt>Path</dt><dd>{item.path}</dd><dt>Type</dt><dd>{item.media_type || 'Markdown'}</dd><dt>Indexed</dt><dd>{new Date(item.indexed_at).toLocaleString()}</dd></dl></div>
+      <div class="inspector-block"><span class="section-label">DETAILS</span><dl><dt>Path</dt><dd>{item.path}</dd><dt>Type</dt><dd>{item.media_type || 'Markdown'}</dd>{#if item.space === 'ingest' && item.ingested_at}<dt>Ingested</dt><dd>{new Date(item.ingested_at).toLocaleString()}</dd>{/if}<dt>Indexed</dt><dd>{new Date(item.indexed_at).toLocaleString()}</dd></dl></div>
       {#if item.history?.length}<div class="inspector-block"><span class="section-label">WIKI HISTORY</span>{#each item.history as event}<p><strong>{event.action}</strong> · {event.kind}<br />{new Date(event.created_at).toLocaleDateString()}</p>{/each}</div>{/if}
     </aside>
   {/if}
